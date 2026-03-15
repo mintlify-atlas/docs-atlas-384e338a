@@ -1,0 +1,95 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "Microservicios Ecosystem",
+  "projectDescription": "A Spring Boot 3.4 / Java 21 microservices ecosystem featuring JWT authentication, hexagonal architecture, event-driven messaging (RabbitMQ/Kafka), distributed tracing (Zipkin), and centralized logging (ELK stack), deployable via Docker Compose or manually.",
+  "theme": "aspen",
+  "primaryColor": "#1c63ec",
+  "lightColor": "#8cb4f4",
+  "darkColor": "#04143c",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart-docker",
+              "quickstart-manual"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/hexagonal",
+              "architecture/event-driven"
+            ]
+          },
+          {
+            "group": "Services",
+            "pages": [
+              "services/config-server",
+              "services/eureka-server",
+              "services/auth-service",
+              "services/api-gateway",
+              "services/inventory-service",
+              "services/notification-service"
+            ]
+          },
+          {
+            "group": "Observability",
+            "pages": [
+              "observability/distributed-tracing",
+              "observability/elk-stack"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/security",
+              "operations/memory-optimization",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api/auth",
+              "api/inventory"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Spring Boot 3.4 / Java 21 Maven multi-module project",
+    "JWT authentication with BCrypt password hashing (HS384)",
+    "Spring Cloud Gateway as OAuth2 Resource Server",
+    "Eureka service discovery with centralized config server",
+    "Hexagonal (Ports & Adapters) architecture in inventory-service",
+    "Event-driven messaging with RabbitMQ and Apache Kafka (switchable via Spring Profiles)",
+    "Distributed tracing with Zipkin and Micrometer Tracing",
+    "Centralized log aggregation with ELK stack (Elasticsearch, Logstash, Kibana)",
+    "Full Docker Compose orchestration with health checks and profiles",
+    "H2 in-memory databases per service for development"
+  ],
+  "publicApiSurface": [
+    "POST /auth/login — Authenticate and receive JWT token",
+    "GET /api/inventory/products — List all products (JWT required)",
+    "GET /api/inventory/products/{id} — Get product by ID (JWT required)",
+    "POST /api/inventory/products — Create product, publishes async event (JWT required)",
+    "GET /actuator/health — Health check for each service",
+    "GET http://localhost:8761 — Eureka service registry dashboard",
+    "GET http://localhost:9411 — Zipkin distributed tracing UI",
+    "GET http://localhost:5601 — Kibana log visualization UI",
+    "GET http://localhost:15672 — RabbitMQ management UI"
+  ]
+}
