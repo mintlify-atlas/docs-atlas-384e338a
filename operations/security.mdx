@@ -1,0 +1,184 @@
+---
+title: "Security"
+description: "JWT authentication, BCrypt password hashing, and OAuth2 resource server configuration."
+---
+
+## Architecture Overview
+
+Security in this ecosystem is layered across three services. The **Auth Service** is the sole issuer of JWTs; the **API Gateway** acts as the first line of defense, validating every inbound token before forwarding requests; the **Inventory Service** independently re-validates the Bearer token as an OAuth2 Resource Server. No downstream service trusts a request unless it carries a valid, unexpired token signed with the shared secret.
+
+```
+Client → API Gateway (validate JWT) → Inventory Service (validate JWT)
+              ↑
+         Auth Service (issue JWT)
+```
+
+## Authentication Flow
+
+<Steps>
+  <Step title="Client sends credentials">
+    The client posts credentials to `POST /auth/login` through the API Gateway. This path is explicitly permitted without authentication in the Gateway's `SecurityWebFilterChain`:
+
+    ```bash
+    curl -X POST http://localhost:8080/auth/login \
+      -H "Content-Type: application/json" \
+      -d '{"username":"admin","password":"admin123"}'
+    ```
+  </Step>
+
+  <Step title="Auth Service validates credentials">
+    `AuthController` looks up the user in the H2 in-memory database (`jdbc:h2:mem:authdb`) via `UserRepository`. The submitted password is compared against the stored BCrypt hash using `PasswordEncoder.matches()`.
+  </Step>
+
+  <Step title="JWT is generated and signed">
+    On a successful match, `JwtService.generateToken()` builds a token using **jjwt**, signed with the shared HMAC-SHA384 (`HS384`) secret key. The token embeds the username as the `subject` claim and the user's roles as a `roles` claim.
+  </Step>
+
+  <Step title="Client receives the token response">
+    The Auth Service returns the following JSON:
+
+    ```json
+    {
+      "token": "eyJhbGciOiJIUzM4NCJ9...",
+      "type": "Bearer",
+      "expiresIn": 3600
+    }
+    ```
+  </Step>
+
+  <Step title="Client attaches the token to subsequent requests">
+    All further requests must include the token in the `Authorization` header:
+
+    ```bash
+    curl -X GET http://localhost:8080/api/inventory/products \
+      -H "Authorization: Bearer <token>"
+    ```
+  </Step>
+
+  <Step title="API Gateway validates the JWT">
+    The Gateway's `SecurityWebFilterChain` (WebFlux, `@EnableWebFluxSecurity`) intercepts the request. `NimbusReactiveJwtDecoder` verifies the signature using the same HS384 key before the request is forwarded to any downstream service.
+  </Step>
+
+  <Step title="Authorization header propagated downstream">
+    `AuthorizationHeaderGatewayFilterFactory` mutates the outbound request to ensure the original `Authorization: Bearer <token>` header is forwarded to downstream services, even when Spring Cloud Gateway rewrites the request.
+  </Step>
+
+  <Step title="Inventory Service re-validates the token">
+    The Inventory Service runs its own `SecurityFilterChain` configured as an OAuth2 Resource Server. It independently decodes the token with `NimbusJwtDecoder` (HS384) and rejects any request where the token is absent, expired, or carries an invalid signature.
+  </Step>
+</Steps>
+
+## JWT Configuration
+
+The JWT secret must be configured identically in all three services that participate in token validation.
+
+```yaml
+jwt:
+  secret: MiClaveSecretaParaJWT_MuyLarga_Y_Segura_123456789
+  expiration-ms: 3600000  # 1 hour (auth-service only)
+```
+
+<Warning>
+  The `jwt.secret` value **must be identical** in `auth-service`, `api-gateway`, and `inventory-service`. If any service uses a different secret, the Gateway or Inventory Service will reject tokens issued by the Auth Service with a 401 Unauthorized error. The `expiration-ms` property is only consumed by `auth-service`.
+</Warning>
+
+<Warning>
+  The default secret `MiClaveSecretaParaJWT_MuyLarga_Y_Segura_123456789` is for development only. In production, replace it with a cryptographically random secret of at least 48 bytes and store it as an environment variable or in a secrets manager — never commit it to source control.
+</Warning>
+
+## BCrypt Password Hashing
+
+The `auth-service` stores all passwords as BCrypt hashes. The `SecurityConfig` in `auth-service` declares a `BCryptPasswordEncoder` bean:
+
+```java
+@Bean
+public PasswordEncoder passwordEncoder() {
+    return new BCryptPasswordEncoder();
+}
+```
+
+`DataInitializer` uses this encoder to hash passwords at startup before persisting users to H2. Raw passwords are never stored. During login, `AuthController` calls `passwordEncoder.matches(rawPassword, hashedPassword)` to verify credentials without ever decoding the hash.
+
+## Spring Security Configuration
+
+### Auth Service
+
+The Auth Service uses a standard servlet-stack `SecurityFilterChain`. It permits `/auth/**`, `/h2-console/**`, and `/actuator/**` without authentication. All other paths require an authenticated session. CSRF is disabled because the service is stateless (JWT-based).
+
+### API Gateway
+
+The Gateway uses **WebFlux Security** (`@EnableWebFluxSecurity`) with a `ServerHttpSecurity`-based Lambda DSL. It configures an `oauth2ResourceServer` with a `NimbusReactiveJwtDecoder` that validates HS384-signed tokens:
+
+```java
+@Bean
+public ReactiveJwtDecoder reactiveJwtDecoder() {
+    SecretKey key = new SecretKeySpec(
+        jwtSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA384"
+    );
+    return NimbusReactiveJwtDecoder
+        .withSecretKey(key)
+        .macAlgorithm(MacAlgorithm.HS384)
+        .build();
+}
+```
+
+Path rules:
+- `/auth/**` — permitted without authentication (login endpoint)
+- `/actuator/**`, `/h2-console/**` — permitted without authentication
+- All other exchanges — must be authenticated
+
+### Inventory Service
+
+The Inventory Service uses a servlet-stack `SecurityFilterChain` with `@EnableWebSecurity`. It also configures an `oauth2ResourceServer` with a `NimbusJwtDecoder` (HS384). The `/api/inventory/**` path requires authentication:
+
+```java
+@Bean
+public JwtDecoder jwtDecoder() {
+    SecretKey key = new SecretKeySpec(
+        jwtSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA384"
+    );
+    return NimbusJwtDecoder
+        .withSecretKey(key)
+        .macAlgorithm(MacAlgorithm.HS384)
+        .build();
+}
+```
+
+## GatewayFilter: Authorization Header Propagation
+
+`AuthorizationHeaderGatewayFilterFactory` is a custom `GatewayFilter` that explicitly copies the `Authorization` header from the incoming request to the mutated outbound request. This guarantees the validated Bearer token reaches all downstream microservices:
+
+```java
+ServerHttpRequest mutatedRequest = request.mutate()
+    .header(AUTHORIZATION, authHeader.get())
+    .build();
+return chain.filter(exchange.mutate().request(mutatedRequest).build());
+```
+
+<Tip>
+  Without this filter, Spring Cloud Gateway may strip or not forward the `Authorization` header depending on route configuration. The explicit mutation ensures consistent behaviour across all routes.
+</Tip>
+
+## Role-Based Access
+
+Roles are stored in the H2 `roles` table of the Auth Service (managed by `DataInitializer`). Two roles are seeded at startup:
+
+| Role | Description |
+|------|-------------|
+| `ADMIN` | Full administrative access |
+| `USER` | Standard user access |
+
+When a JWT is generated, roles are embedded as a `roles` claim in the format `ROLE_ADMIN`, `ROLE_USER`. Downstream services can use these claims for fine-grained authorization decisions.
+
+## Test Credentials
+
+The `DataInitializer` seeds the following users into the Auth Service H2 database at startup:
+
+| Username | Password | Roles |
+|----------|----------|-------|
+| `admin` | `admin123` | `ADMIN`, `USER` |
+| `user` | `user123` | `USER` |
+
+<Warning>
+  These credentials are for development only. Do not use them in any environment exposed to the internet.
+</Warning>

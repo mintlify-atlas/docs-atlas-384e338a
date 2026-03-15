@@ -1,0 +1,226 @@
+---
+title: "Auth Service"
+description: "JWT authentication service with BCrypt password hashing and H2 in-memory database."
+---
+
+The Auth Service is the identity provider for the ecosystem. It validates credentials, issues signed JWT tokens, and returns them to clients. The API Gateway and Inventory Service both validate those tokens independently using the shared secret.
+
+## Overview
+
+| Property | Value |
+|----------|-------|
+| **Port** | `8083` |
+| **Spring application name** | `auth-service` |
+| **Database** | H2 in-memory (`authdb`) |
+| **H2 Console** | [http://localhost:8083/h2-console](http://localhost:8083/h2-console) |
+| **JDBC URL** | `jdbc:h2:mem:authdb` |
+| **DB Username** | `sa` |
+| **DB Password** | *(empty)* |
+| **Health check** | `GET /actuator/health` |
+
+## Configuration
+
+```yaml
+# auth-service/src/main/resources/application.yml
+server:
+  port: 8083
+
+spring:
+  application:
+    name: auth-service
+  datasource:
+    url: jdbc:h2:mem:authdb
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+  sql:
+    init:
+      mode: always
+
+jwt:
+  secret: MiClaveSecretaParaJWT_MuyLarga_Y_Segura_123456789
+  expiration-ms: 3600000
+
+management:
+  tracing:
+    sampling:
+      probability: 0.0
+
+logging:
+  pattern:
+    correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "
+```
+
+## JWT configuration
+
+| Property | Value |
+|----------|-------|
+| **Algorithm** | HS384 (HMAC-SHA384) |
+| **Expiration** | `3600000` ms = 1 hour |
+| **Secret key** | `MiClaveSecretaParaJWT_MuyLarga_Y_Segura_123456789` |
+
+<Warning>
+  The `jwt.secret` value **must be identical** in `auth-service`, `api-gateway`, and `inventory-service`. If any of the three has a different secret, JWT validation will fail with a 401 error. Change all three at the same time.
+</Warning>
+
+## Test users
+
+The `DataInitializer` seeds these users on startup:
+
+| Username | Password | Roles |
+|----------|----------|-------|
+| `admin` | `admin123` | `ADMIN`, `USER` |
+| `user` | `user123` | `USER` |
+
+Passwords are stored as BCrypt hashes. The H2 database is in-memory (`create-drop`), so the seed runs on every restart.
+
+## Login endpoint
+
+`POST /auth/login` accepts JSON credentials and returns a JWT token. See the [API Reference](/api-reference) for the full request/response schema.
+
+### Request body
+
+```json
+{
+  "username": "admin",
+  "password": "admin123"
+}
+```
+
+### JWT response
+
+```json
+{
+  "token": "eyJhbGciOiJIUzM4NCJ9...",
+  "type": "Bearer",
+  "expiresIn": 3600
+}
+```
+
+### Source — AuthController.java
+
+```java
+@RestController
+@RequestMapping("/auth")
+public class AuthController {
+
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final JwtService jwtService;
+
+    public AuthController(UserRepository userRepository,
+                          PasswordEncoder passwordEncoder,
+                          JwtService jwtService) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+        this.jwtService = jwtService;
+    }
+
+    @PostMapping("/login")
+    public ResponseEntity<TokenResponse> login(@Valid @RequestBody LoginRequest request) {
+        return userRepository.findByUsername(request.username())
+                .filter(user -> passwordEncoder.matches(request.password(), user.getPassword()))
+                .map(user -> {
+                    List<String> roles = user.getRoles().stream()
+                            .map(r -> "ROLE_" + r.getName())
+                            .toList();
+                    String token = jwtService.generateToken(user.getUsername(), roles);
+                    return ResponseEntity.ok(new TokenResponse(token, "Bearer", 3600));
+                })
+                .orElse(ResponseEntity.status(401).build());
+    }
+}
+```
+
+### Source — JwtService.java
+
+```java
+@Service
+public class JwtService {
+
+    private final SecretKey secretKey;
+    private final long expirationMs;
+
+    public JwtService(@Value("${jwt.secret}") String secret,
+                      @Value("${jwt.expiration-ms:3600000}") long expirationMs) {
+        this.secretKey = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+        this.expirationMs = expirationMs;
+    }
+
+    public String generateToken(String username, List<String> roles) {
+        return Jwts.builder()
+                .subject(username)
+                .claim("roles", roles)
+                .issuedAt(new Date())
+                .expiration(new Date(System.currentTimeMillis() + expirationMs))
+                .signWith(secretKey)
+                .compact();
+    }
+
+    public Claims parseToken(String token) {
+        return Jwts.parser()
+                .verifyWith(secretKey)
+                .build()
+                .parseSignedClaims(token)
+                .getPayload();
+    }
+
+    public boolean validateToken(String token, String username) {
+        try {
+            Claims claims = parseToken(token);
+            return claims.getSubject().equals(username) && !claims.getExpiration().before(new Date());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+}
+```
+
+The token is signed with `Keys.hmacShaKeyFor(...)`, which selects HS384 for keys long enough to meet the minimum key length requirement.
+
+## Key dependencies
+
+| Dependency | Purpose |
+|------------|---------|
+| `spring-boot-starter-security` | BCrypt, Spring Security filter chain |
+| `spring-boot-starter-data-jpa` + `h2` | User persistence (in-memory) |
+| `jjwt-api` / `jjwt-impl` / `jjwt-jackson` (0.12.6) | JWT generation and parsing |
+| `spring-cloud-starter-netflix-eureka-client` | Service registration |
+| `micrometer-tracing-bridge-brave` + `zipkin-reporter-brave` | Distributed tracing |
+| `logstash-logback-encoder` 7.4 | JSON log shipping to Logstash |
+
+## Starting the service
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker compose --profile rabbitmq up --build
+    ```
+
+    The service depends on `config-server` (healthy), `eureka-server` (healthy), and `zipkin` (healthy).
+  </Tab>
+  <Tab title="Manual (bash)">
+    ```bash
+    # Terminal 3 — after config-server and eureka-server are up
+    cd auth-service
+    mvn spring-boot:run
+    ```
+  </Tab>
+  <Tab title="Manual (CMD)">
+    ```cmd
+    cd auth-service
+    mvn spring-boot:run
+    ```
+  </Tab>
+</Tabs>
+
+<Card title="API Gateway" href="/services/api-gateway">
+  The gateway validates tokens issued here on every protected request.
+</Card>

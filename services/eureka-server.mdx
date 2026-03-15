@@ -1,0 +1,152 @@
+---
+title: "Eureka Server"
+description: "Netflix Eureka service registry for service discovery across the microservices ecosystem."
+---
+
+The Eureka Server is the service registry. Every microservice registers itself here on startup, and the API Gateway uses it to resolve `lb://service-name` URIs to real host:port addresses without hardcoding them.
+
+## Overview
+
+| Property | Value |
+|----------|-------|
+| **Port** | `8761` |
+| **Spring application name** | `eureka-server` |
+| **Dashboard** | [http://localhost:8761](http://localhost:8761) |
+| **Health check** | `GET /actuator/health` |
+
+## Configuration
+
+```yaml
+# eureka-server/src/main/resources/application.yml
+server:
+  port: 8761
+
+spring:
+  application:
+    name: eureka-server
+
+eureka:
+  instance:
+    hostname: localhost
+  client:
+    register-with-eureka: false
+    fetch-registry: false
+    service-url:
+      defaultZone: http://${eureka.instance.hostname}:${server.port}/eureka/
+```
+
+`register-with-eureka: false` and `fetch-registry: false` prevent the Eureka Server from registering itself as a client.
+
+## Docker Compose configuration
+
+```yaml
+eureka-server:
+  build:
+    context: .
+    dockerfile: eureka-server/Dockerfile
+  ports:
+    - "8761:8761"
+  environment:
+    EUREKA_INSTANCE_HOSTNAME: eureka-server
+  healthcheck:
+    test: ["CMD", "wget", "--no-verbose", "--tries=1", "-O", "/dev/null", "http://localhost:8761/actuator/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 40s
+```
+
+## Starting the service
+
+<Tabs>
+  <Tab title="Docker">
+    Eureka starts automatically as part of any Docker Compose profile:
+
+    ```bash
+    docker compose --profile rabbitmq up --build
+    # or
+    docker compose --profile kafka up --build
+    ```
+  </Tab>
+  <Tab title="Manual (bash)">
+    ```bash
+    # Terminal 2 — start after config-server is healthy
+    cd eureka-server
+    mvn spring-boot:run
+    ```
+  </Tab>
+  <Tab title="Manual (CMD)">
+    ```cmd
+    cd eureka-server
+    mvn spring-boot:run
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Eureka Server must start **after** Config Server. All downstream services (`auth-service`, `inventory-service`, `api-gateway`, `notification-service`) declare `condition: service_healthy` on Eureka in `docker-compose.yml`.
+</Note>
+
+## How services register
+
+Each service sets the Eureka zone via the `EUREKA_CLIENT_SERVICEURL_DEFAULTZONE` environment variable:
+
+```yaml
+# In each service's application.yml (local)
+eureka:
+  instance:
+    prefer-ip-address: true
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+```
+
+```yaml
+# In docker-compose.yml (container networking)
+environment:
+  EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+  EUREKA_INSTANCE_PREFER_IP_ADDRESS: "true"
+```
+
+## How the API Gateway uses Eureka
+
+The gateway has Eureka discovery enabled and uses load-balanced (`lb://`) URIs in its routes:
+
+```yaml
+spring:
+  cloud:
+    gateway:
+      discovery:
+        locator:
+          enabled: true
+          lower-case-service-id: true
+      routes:
+        - id: auth-service
+          uri: lb://auth-service
+          predicates:
+            - Path=/auth/**
+        - id: inventory-service
+          uri: lb://inventory-service
+          predicates:
+            - Path=/api/inventory/**
+```
+
+When a request arrives at the gateway, Eureka resolves `lb://inventory-service` to the registered IP and port of the running inventory-service instance.
+
+## Health check
+
+```bash
+curl http://localhost:8761/actuator/health
+```
+
+## Verifying registered services
+
+```bash
+curl http://localhost:8761/eureka/apps
+```
+
+Or open the dashboard at [http://localhost:8761](http://localhost:8761) to see all registered instances.
+
+<Card title="API Gateway" href="/services/api-gateway">
+  Uses Eureka to route requests to registered service instances.
+</Card>

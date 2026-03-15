@@ -1,0 +1,129 @@
+---
+title: "Distributed Tracing"
+description: "End-to-end request tracing across all microservices using Micrometer Tracing, Brave, and Zipkin."
+---
+
+In a microservices system, a single client request passes through multiple services — gateway, authentication, business logic, messaging. When something goes wrong, or you need to understand latency, the log output from a single service is not enough. You need to follow the request across the entire chain.
+
+**Distributed tracing** solves this by assigning a unique `traceId` to every request at entry. Each service that handles the request creates a **span** — a timed unit of work — and all spans share the same `traceId`. A tracing server (Zipkin) collects and correlates them, giving you a timeline of the full request lifecycle.
+
+## Technology stack
+
+| Component | Role |
+|-----------|------|
+| Micrometer Tracing | API for Spring Boot 3.x tracing (replaces Spring Cloud Sleuth) |
+| Brave (`micrometer-tracing-bridge-brave`) | Tracing implementation bridge |
+| Zipkin Reporter (`zipkin-reporter-brave`) | Ships completed spans to the Zipkin server |
+| Zipkin Server | Collects, stores, and visualizes traces |
+
+## Service configuration
+
+Every service in the ecosystem applies the following configuration. Note that `auth-service` and `api-gateway` have `probability: 0.0` in their local `application.yml` files for development (no Zipkin running locally), but the Docker Compose environment overrides the Zipkin endpoint via `MANAGEMENT_ZIPKIN_TRACING_ENDPOINT`.
+
+The canonical tracing configuration applied to each service:
+
+```yaml
+management:
+  tracing:
+    sampling:
+      probability: 1.0       # 100% in dev, lower in prod
+  zipkin:
+    tracing:
+      endpoint: http://localhost:9411/api/v2/spans
+
+logging:
+  pattern:
+    correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "
+```
+
+- `probability: 1.0` — Every request is traced. Sufficient for development where traffic is low.
+- `correlation` — Injects service name, `traceId`, and `spanId` into every log line, enabling cross-service log correlation.
+
+When running with Docker Compose, each service container receives the Zipkin endpoint via environment variable:
+
+```yaml
+environment:
+  MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
+```
+
+<Note>
+  `probability: 1.0` is appropriate for development environments. In production, set this to `0.1` (10%) or lower to avoid performance overhead and storage costs from tracing every request.
+</Note>
+
+## Services that report traces
+
+| Service | Port | Role in the trace |
+|---------|------|-------------------|
+| `api-gateway` | 8080 | Root span — receives the request from the client |
+| `auth-service` | 8083 | Authentication span (login endpoint) |
+| `inventory-service` | 8082 | Business logic span (product CRUD) |
+| `notification-service` | 8084 | Async consumer span (event processing) |
+
+## Trace flow: creating a product
+
+When a client calls `POST /api/inventory/products` with a JWT token, Zipkin records the following chain:
+
+```
+[api-gateway]  ────────────────────────────────────────────────
+   │
+   ├── [inventory-service]  ───────────────────────────────────
+   │       │
+   │       └── [notification-service]  ── (async event)
+   │
+   └── duration total: ~120ms
+```
+
+1. `api-gateway` receives the HTTP request, validates the JWT, and forwards it upstream. This is the root span.
+2. `inventory-service` receives the proxied request, persists the product, and publishes a message event. Its span is a child of the gateway span.
+3. `notification-service` consumes the event from RabbitMQ or Kafka. Because the tracing context is propagated through the message headers, its span is linked to the same `traceId`.
+
+## Log correlation
+
+Because the `correlation` pattern is applied to every service's logger, all log lines from a single request share the same `traceId`:
+
+```
+[api-gateway,6b3e44e01a7d4c00,6b3e44e01a7d4c00] GET /api/inventory/products
+[inventory-service,6b3e44e01a7d4c00,a1b2c3d4e5f60000] Returning 3 products
+```
+
+The first field is the service name, the second is the `traceId` (identical across services), and the third is the `spanId` (unique to each service's work unit). You can copy the `traceId` from either service's console output and use it to search in Kibana for all related log events.
+
+## Using the Zipkin UI
+
+Zipkin is available at **http://localhost:9411** when running with Docker Compose.
+
+### Search by service or duration
+
+1. Open http://localhost:9411
+2. Select a service name from the **Service Name** dropdown (e.g., `api-gateway`).
+3. Optionally set a **Min Duration** to filter slow requests.
+4. Click **Run Query** to list matching traces.
+5. Click any trace row to open the span waterfall view.
+
+### Search by traceId
+
+If you have a `traceId` from a service log, enter it directly in the search field. Zipkin resolves the full trace regardless of which service generated it.
+
+### Dependency diagram
+
+Navigate to the **Dependencies** tab to see a graph of which services call which other services, derived from the collected spans. This updates automatically as traffic flows through the system.
+
+### Span latency analysis
+
+In the span waterfall view, each row represents one span. The horizontal bar shows the start time and duration relative to the root span. Use this to identify which service introduced latency into the overall request.
+
+## Verify Zipkin is receiving spans
+
+```bash
+# Check the services list — populated once at least one trace has been sent
+curl http://localhost:9411/api/v2/services
+
+# Check cluster health
+curl http://localhost:9411/health
+```
+
+If the services list is empty after sending requests, confirm that `MANAGEMENT_ZIPKIN_TRACING_ENDPOINT` is set correctly in the service's environment and that the Zipkin container is healthy:
+
+```bash
+docker ps --filter name=zipkin
+```

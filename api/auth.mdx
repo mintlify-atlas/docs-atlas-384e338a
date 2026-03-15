@@ -1,0 +1,106 @@
+---
+title: "Auth API"
+description: "Authentication endpoint for obtaining JWT tokens."
+---
+
+## Overview
+
+| | |
+|---|---|
+| **Base URL** | `http://localhost:8080/auth/login` |
+| **Authentication** | None required |
+| **Token algorithm** | HS384 |
+
+---
+
+## POST /auth/login
+
+Validates the provided credentials against the user store and returns a signed JWT Bearer token. The token must be included in the `Authorization` header for all subsequent requests to protected services.
+
+Passwords are verified using BCrypt. On invalid credentials the endpoint returns `401` with no response body.
+
+### Request body
+
+<ParamField body="username" type="string" required>
+  The user's username.
+</ParamField>
+
+<ParamField body="password" type="string" required>
+  The user's plaintext password.
+</ParamField>
+
+### Response body
+
+<ResponseField name="token" type="string">
+  The signed JWT token (HS384).
+</ResponseField>
+
+<ResponseField name="type" type="string">
+  Token type. Always `"Bearer"`.
+</ResponseField>
+
+<ResponseField name="expiresIn" type="number">
+  Token validity in seconds. Always `3600` (1 hour).
+</ResponseField>
+
+### Code examples
+
+<Tabs>
+  <Tab title="Linux / macOS / Git Bash">
+    ```bash
+    curl -X POST http://localhost:8080/auth/login \
+      -H "Content-Type: application/json" \
+      -d '{"username":"admin","password":"admin123"}'
+    ```
+  </Tab>
+  <Tab title="Windows CMD">
+    ```cmd
+    curl -X POST http://localhost:8080/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"admin123\"}"
+    ```
+  </Tab>
+  <Tab title="Windows PowerShell">
+    ```powershell
+    $response = Invoke-RestMethod -Uri "http://localhost:8080/auth/login" -Method POST -ContentType "application/json" -Body '{"username":"admin","password":"admin123"}'
+    $response.token
+    ```
+  </Tab>
+</Tabs>
+
+### Example response
+
+```json
+{
+  "token": "eyJhbGciOiJIUzM4NCJ9...",
+  "type": "Bearer",
+  "expiresIn": 3600
+}
+```
+
+### Error responses
+
+| Status | Meaning |
+|--------|---------|
+| `401 Unauthorized` | Invalid credentials. No response body is returned. |
+
+---
+
+## Test users
+
+| Username | Password | Roles |
+|----------|----------|-------|
+| `admin` | `admin123` | ADMIN, USER |
+| `user` | `user123` | USER |
+
+---
+
+## Using the token
+
+<Note>
+  Include the returned token in every request to a protected endpoint using the `Authorization` header:
+
+  ```
+  Authorization: Bearer <token>
+  ```
+
+  The API Gateway validates the JWT on every inbound request before forwarding it to downstream services. Tokens expire after **3600 seconds** (1 hour); call `/auth/login` again to obtain a fresh token.
+</Note>

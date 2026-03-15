@@ -1,0 +1,286 @@
+---
+title: "Docker Quickstart"
+description: "Run the full microservices ecosystem with Docker Compose in minutes."
+---
+
+## Prerequisites
+
+Before you start, make sure you have the following installed:
+
+- **Java 21** — required to build the Maven modules
+- **Maven 3.9+** — used to compile and package all services
+- **Docker Desktop** — runs all services and infrastructure components as containers
+
+<Warning>
+  Docker Desktop must be running before you execute any `docker compose` command. Check that the Docker icon in your system tray does not show "starting..." before proceeding.
+</Warning>
+
+## Service URLs
+
+Once all services are up, the following endpoints are available:
+
+| Service | URL |
+|---------|-----|
+| API Gateway | http://localhost:8080 |
+| Auth Service | http://localhost:8083 |
+| Inventory Service | http://localhost:8082 |
+| Notification Service | http://localhost:8084 |
+| Config Server | http://localhost:8888 |
+| Eureka Dashboard | http://localhost:8761 |
+| RabbitMQ Management | http://localhost:15672 |
+| Zipkin | http://localhost:9411 |
+| Elasticsearch | http://localhost:9200 |
+| Kibana | http://localhost:5601 |
+
+## Steps
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the project repository to your local machine:
+
+    <CodeGroup>
+
+    ```bash Linux / macOS
+    git clone <repository-url>
+    cd microservicios
+    ```
+
+    ```cmd Windows CMD
+    git clone <repository-url>
+    cd microservicios
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Build all Maven modules">
+    Compile and package every module, skipping tests to speed up the initial build:
+
+    <CodeGroup>
+
+    ```bash Linux / macOS
+    mvn clean package -DskipTests
+    ```
+
+    ```cmd Windows CMD
+    mvn clean package -DskipTests
+    ```
+
+    ```powershell Windows PowerShell
+    mvn clean package -DskipTests
+    ```
+
+    </CodeGroup>
+
+    This produces the executable JARs that Docker will copy into each service image.
+  </Step>
+
+  <Step title="Choose a message broker and start the stack">
+    The project supports two broker options. Pick one and run the corresponding command:
+
+    <Tabs>
+      <Tab title="RabbitMQ">
+        RabbitMQ is the lighter-weight option and is the recommended default.
+
+        <CodeGroup>
+
+        ```bash Linux / macOS
+        docker compose --profile rabbitmq up --build
+        ```
+
+        ```cmd Windows CMD
+        docker compose --profile rabbitmq up --build
+        ```
+
+        ```powershell Windows PowerShell
+        docker compose --profile rabbitmq up --build
+        ```
+
+        </CodeGroup>
+
+        This starts: RabbitMQ, Zipkin, Elasticsearch, Kibana, Config Server, Eureka Server, Auth Service, API Gateway, Inventory Service (rabbitmq profile), and Notification Service (rabbitmq profile).
+      </Tab>
+
+      <Tab title="Apache Kafka">
+        Kafka uses KRaft mode (no Zookeeper required).
+
+        <CodeGroup>
+
+        ```bash Linux / macOS
+        docker compose --profile kafka up --build
+        ```
+
+        ```cmd Windows CMD
+        docker compose --profile kafka up --build
+        ```
+
+        ```powershell Windows PowerShell
+        docker compose --profile kafka up --build
+        ```
+
+        </CodeGroup>
+
+        This starts: Kafka (KRaft), Zipkin, Elasticsearch, Kibana, Config Server, Eureka Server, Auth Service, API Gateway, Inventory Service (kafka profile), and Notification Service (kafka profile).
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Wait for all services to be healthy">
+    Docker Compose uses `depends_on` with healthchecks to start services in the correct order. Wait until you see all containers reach a healthy state in the terminal output. The slowest services to start are Elasticsearch and Kibana, which can take up to 60 seconds.
+
+    You can monitor container health in a second terminal with:
+
+    ```bash
+    docker compose ps
+    ```
+  </Step>
+
+  <Step title="Verify health checks">
+    Confirm each service is responding correctly:
+
+    <CodeGroup>
+
+    ```bash Linux / macOS
+    # API Gateway
+    curl http://localhost:8080/actuator/health
+
+    # Auth Service
+    curl http://localhost:8083/actuator/health
+
+    # Inventory Service
+    curl http://localhost:8082/actuator/health
+
+    # Notification Service
+    curl http://localhost:8084/actuator/health
+
+    # Eureka (verify all services are registered)
+    curl http://localhost:8761/eureka/apps
+    ```
+
+    ```cmd Windows CMD
+    curl http://localhost:8080/actuator/health
+    curl http://localhost:8083/actuator/health
+    curl http://localhost:8082/actuator/health
+    curl http://localhost:8084/actuator/health
+    curl http://localhost:8761/eureka/apps
+    ```
+
+    </CodeGroup>
+
+    Each health endpoint should return `{"status":"UP"}`.
+  </Step>
+
+  <Step title="Log in and obtain a JWT token">
+    The API Gateway is the single entry point for all requests. Authenticate as the `admin` user:
+
+    <CodeGroup>
+
+    ```bash Linux / macOS
+    curl -X POST http://localhost:8080/auth/login \
+      -H "Content-Type: application/json" \
+      -d '{"username":"admin","password":"admin123"}'
+    ```
+
+    ```cmd Windows CMD
+    curl -X POST http://localhost:8080/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"admin123\"}"
+    ```
+
+    ```powershell Windows PowerShell
+    $response = Invoke-RestMethod -Uri "http://localhost:8080/auth/login" -Method POST -ContentType "application/json" -Body '{"username":"admin","password":"admin123"}'
+    $response.token
+    ```
+
+    </CodeGroup>
+
+    Expected response:
+
+    ```json
+    {
+      "token": "eyJhbGciOiJIUzM4NCJ9...",
+      "type": "Bearer",
+      "expiresIn": 3600
+    }
+    ```
+
+    Save the token value — you will use it in the next step.
+  </Step>
+
+  <Step title="Create a product (end-to-end test)">
+    Use the token from the previous step to create a product. This request flows through the API Gateway → Inventory Service and publishes an event to the broker, which is consumed by the Notification Service.
+
+    <CodeGroup>
+
+    ```bash Linux / macOS
+    # Store the token in a variable first
+    TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
+      -H "Content-Type: application/json" \
+      -d '{"username":"admin","password":"admin123"}' | jq -r '.token')
+
+    # Create a product
+    curl -X POST http://localhost:8080/api/inventory/products \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"Monitor","quantity":15,"price":299.99}'
+    ```
+
+    ```cmd Windows CMD
+    curl -X POST http://localhost:8080/api/inventory/products -H "Authorization: Bearer TOKEN_AQUI" -H "Content-Type: application/json" -d "{\"name\":\"Monitor\",\"quantity\":15,\"price\":299.99}"
+    ```
+
+    ```powershell Windows PowerShell
+    $response = Invoke-RestMethod -Uri "http://localhost:8080/auth/login" -Method POST -ContentType "application/json" -Body '{"username":"admin","password":"admin123"}'
+    $token = $response.token
+    Invoke-RestMethod -Uri "http://localhost:8080/api/inventory/products" -Method POST -ContentType "application/json" -Headers @{ Authorization = "Bearer $token" } -Body '{"name":"Monitor","quantity":15,"price":299.99}'
+    ```
+
+    </CodeGroup>
+
+    After the product is created, check the `notification-service` container logs to confirm the event was received:
+
+    <Tabs>
+      <Tab title="RabbitMQ">
+        ```
+        === NOTIFICACIÓN RECIBIDA ===
+        Nuevo producto creado:
+          ID:       4
+          Nombre:   Monitor
+          ...
+        =============================
+        ```
+      </Tab>
+      <Tab title="Apache Kafka">
+        ```
+        === NOTIFICACIÓN RECIBIDA (Kafka) ===
+        Nuevo producto creado:
+          ID:       4
+          Nombre:   Monitor
+          ...
+        =====================================
+        ```
+      </Tab>
+    </Tabs>
+
+    You can also view the distributed trace for this request at [http://localhost:9411](http://localhost:9411) and the centralized logs at [http://localhost:5601](http://localhost:5601).
+  </Step>
+</Steps>
+
+## Tearing down
+
+Press `Ctrl+C` in the terminal where the stack is running to stop all containers, then run the appropriate teardown command:
+
+<Tabs>
+  <Tab title="RabbitMQ">
+    ```bash
+    docker compose --profile rabbitmq down
+    ```
+  </Tab>
+  <Tab title="Apache Kafka">
+    ```bash
+    docker compose --profile kafka down
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  `Ctrl+C` stops the running containers but leaves them and the Docker network intact. Running `docker compose down` removes the containers and the network. Use `docker compose down -v` if you also want to delete the Elasticsearch data volume (`elasticsearch-data`).
+</Note>

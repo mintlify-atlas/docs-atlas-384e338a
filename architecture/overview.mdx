@@ -1,0 +1,114 @@
+---
+title: "Architecture Overview"
+description: "System design, service interactions, and technology choices for the microservices ecosystem."
+---
+
+This ecosystem consists of **6 Spring Boot 3.4 services**, a choice of **2 message brokers** (RabbitMQ or Apache Kafka), and a full **observability stack** (Zipkin for distributed tracing, ELK for centralized logging). All services are built with Java 21, packaged as a Maven multi-module project, and fully containerized via Docker Compose.
+
+## Services
+
+| Module | Port | Description |
+|--------|------|-------------|
+| `config-server` | 8888 | Centralized configuration (native filesystem) |
+| `eureka-server` | 8761 | Service discovery (Netflix Eureka) |
+| `auth-service` | 8083 | Identity service — JWT issuance, BCrypt, H2 |
+| `api-gateway` | 8080 | Spring Cloud Gateway — OAuth2 resource server, JWT validation |
+| `inventory-service` | 8082 | Protected inventory microservice — hexagonal architecture, H2 |
+| `notification-service` | 8084 | Async event consumer — RabbitMQ or Kafka |
+
+## Technology stack
+
+| Layer | Technology |
+|-------|------------|
+| Framework | Spring Boot 3.4, Spring Cloud 2024.0.0 |
+| Language | Java 21 |
+| Build | Maven 3.9+ (multi-module) |
+| Service Discovery | Netflix Eureka |
+| Configuration | Spring Cloud Config (native filesystem) |
+| API Gateway | Spring Cloud Gateway (WebFlux) |
+| Security | JWT (HS384), BCrypt, Spring Security OAuth2 |
+| Messaging | RabbitMQ 3 or Apache Kafka (KRaft) |
+| Persistence | H2 in-memory (per-service) |
+| Tracing | Micrometer Tracing + Brave + Zipkin |
+| Logging | Logback + logstash-logback-encoder + ELK Stack |
+
+## Service startup order
+
+Services must start in dependency order. The `docker-compose.yml` enforces this with `depends_on` and healthchecks:
+
+<Steps>
+  <Step title="Infrastructure (broker + observability)">
+    Start the chosen message broker (`rabbitmq` or `kafka`), `zipkin`, `elasticsearch`, and `kibana`. These have no Spring Boot dependencies.
+  </Step>
+  <Step title="config-server (port 8888)">
+    Must start first among Spring services. All other services fetch their configuration from it. Run with profile `native` so it reads config from the local `config/` directory instead of a Git repository.
+  </Step>
+  <Step title="eureka-server (port 8761)">
+    Starts after `config-server` is healthy. All application services register here for discovery.
+  </Step>
+  <Step title="auth-service + api-gateway (ports 8083, 8080)">
+    Both depend on `config-server` and `eureka-server`. The gateway can start in parallel with `auth-service`.
+  </Step>
+  <Step title="inventory-service + notification-service (ports 8082, 8084)">
+    Start last. Both depend on the config server, Eureka, and the active message broker. Both must run with the same Spring profile (`rabbitmq` or `kafka`).
+  </Step>
+</Steps>
+
+```
+config-server (8888)
+    │
+    └─► eureka-server (8761)
+            │
+            ├─► auth-service (8083)
+            ├─► api-gateway (8080)
+            ├─► inventory-service (8082)  ──► broker ──► notification-service (8084)
+            └─► notification-service (8084)
+```
+
+## Request flow
+
+Every request to a protected resource follows this path:
+
+```
+Client
+  │
+  │  HTTP request + Bearer token
+  ▼
+API Gateway (port 8080)
+  │  1. Validates JWT signature (HS384 shared secret)
+  │  2. Propagates Authorization header downstream
+  ▼
+Downstream service (e.g. inventory-service)
+  │  3. Spring Security OAuth2 Resource Server re-validates JWT
+  │  4. Executes business logic
+  ▼
+Response returned through gateway to client
+```
+
+Requests without a valid token are rejected at the gateway with HTTP 401 before reaching any downstream service.
+
+## Observability
+
+| Tool | Port | Purpose |
+|------|------|---------|
+| Zipkin | 9411 | Distributed trace visualization — spans grouped by `traceId` |
+| Elasticsearch | 9200 | Log storage and full-text search |
+| Logstash | 5044 | Log ingestion and parsing (TCP, JSON format) |
+| Kibana | 5601 | Log UI — filter by service, level, traceId |
+
+All four application services (`api-gateway`, `auth-service`, `inventory-service`, `notification-service`) report traces to Zipkin and ship structured JSON logs to Logstash. The same `traceId` appears in both systems, enabling cross-tool correlation.
+
+<CardGroup cols={2}>
+  <Card title="Hexagonal Architecture" icon="hexagon" href="/architecture/hexagonal">
+    How the inventory service isolates domain logic from infrastructure using Ports & Adapters.
+  </Card>
+  <Card title="Event-Driven Architecture" icon="zap" href="/architecture/event-driven">
+    Asynchronous messaging between services with RabbitMQ and Kafka, switchable via Spring Profiles.
+  </Card>
+  <Card title="Distributed Tracing" icon="search" href="/observability/distributed-tracing">
+    Micrometer Tracing, Brave, and Zipkin for end-to-end request visibility.
+  </Card>
+  <Card title="Centralized Logging (ELK)" icon="file-text" href="/observability/elk-stack">
+    Elasticsearch, Logstash, and Kibana for structured log aggregation and search.
+  </Card>
+</CardGroup>

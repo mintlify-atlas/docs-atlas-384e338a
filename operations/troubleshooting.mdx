@@ -1,0 +1,296 @@
+---
+title: "Troubleshooting"
+description: "Common issues and solutions when running the microservices ecosystem."
+---
+
+<AccordionGroup>
+
+  <Accordion title="Config Server fails to start — Missing 'native' profile">
+    **Symptom:** The config-server exits immediately with:
+    ```
+    Invalid config server configuration
+    ```
+
+    **Cause:** Spring Cloud Config Server defaults to the `git` profile, which expects a Git repository URI. Without one, it cannot initialise. The `native` profile tells it to read configuration files from the local `config/` directory instead.
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Start config-server with the native profile">
+        ```bash
+        cd config-server && mvn spring-boot:run -Dspring-boot.run.profiles=native
+        ```
+      </Step>
+      <Step title="Verify it is healthy">
+        ```bash
+        curl http://localhost:8888/actuator/health
+        ```
+        Expect `{"status":"UP"}`.
+      </Step>
+    </Steps>
+
+    When running with Docker Compose, the `SPRING_PROFILES_ACTIVE: native` environment variable is already set in `docker-compose.yml` for the `config-server` service.
+  </Accordion>
+
+  <Accordion title="Services fail to register with Eureka — Startup order issue">
+    **Symptom:** A service starts but does not appear in the Eureka dashboard at `http://localhost:8761`. Logs may show repeated connection refused errors against `http://localhost:8761/eureka/`.
+
+    **Cause:** The service started before `config-server` or `eureka-server` finished their healthchecks. When running manually, there is no `depends_on` guard.
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Start infrastructure services first">
+        Always start `config-server` (port 8888) first, wait for it to respond, then start `eureka-server` (port 8761):
+
+        ```bash
+        # Terminal 1
+        cd config-server && mvn spring-boot:run -Dspring-boot.run.profiles=native
+
+        # Terminal 2 (after config-server is healthy)
+        cd eureka-server && mvn spring-boot:run
+        ```
+      </Step>
+      <Step title="Verify the Eureka URL environment variable">
+        Each service must point to the correct Eureka instance. Check that the environment variable is set correctly:
+
+        ```bash
+        # For Docker deployments
+        EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://eureka-server:8761/eureka/
+
+        # For local/manual deployments
+        EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://localhost:8761/eureka/
+        ```
+      </Step>
+      <Step title="Check the Eureka dashboard">
+        Open `http://localhost:8761` and confirm the service appears under **Instances currently registered with Eureka** within 30 seconds of startup.
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="API Gateway returns 401 Unauthorized — JWT secret mismatch">
+    **Symptom:** Every request to a protected endpoint returns `401 Unauthorized`, even when the token was just obtained from `/auth/login` and has not expired.
+
+    **Cause:** The `jwt.secret` value in one or more services does not match the value used to sign the token. The Gateway's `NimbusReactiveJwtDecoder` (HS384) will reject any token it cannot verify with its own key.
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Confirm the shared secret is identical in all three services">
+        Check `application.yml` (or the config-server's `config/` directory) for each of the following services:
+
+        - `auth-service`
+        - `api-gateway`
+        - `inventory-service`
+
+        All three must have the **same** value for `jwt.secret`:
+
+        ```yaml
+        jwt:
+          secret: MiClaveSecretaParaJWT_MuyLarga_Y_Segura_123456789
+        ```
+      </Step>
+      <Step title="Restart services after correcting the secret">
+        Configuration changes to `jwt.secret` require a full service restart. Obtain a fresh token after restarting.
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="Docker Desktop not running">
+    **Symptom:** Running any `docker compose` command fails immediately with an error such as:
+    ```
+    error during connect: ... Is the docker daemon running?
+    ```
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Launch Docker Desktop">
+        Open Docker Desktop from your applications menu or system tray.
+      </Step>
+      <Step title="Wait for Docker to be ready">
+        Watch the tray icon. Do not run `docker compose` until the icon stops showing **"starting..."** and the Docker Desktop window shows **"Docker Desktop is running"**.
+      </Step>
+      <Step title="Retry the compose command">
+        ```bash
+        docker compose --profile rabbitmq up --build
+        ```
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="Elasticsearch not starting">
+    **Symptom:** The `elasticsearch` container repeatedly fails its healthcheck. Other services that depend on it (`kibana`, `inventory-service`) will not start.
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Inspect the container logs">
+        ```bash
+        docker logs <elasticsearch-container-id>
+        ```
+        Common root causes include a corrupted data volume or insufficient `vm.max_map_count` on Linux hosts.
+      </Step>
+      <Step title="Reset the Elasticsearch data volume">
+        If the logs indicate a corrupted index or shard, the fastest recovery is to remove and recreate the volume:
+
+        ```bash
+        docker compose down elasticsearch
+        docker volume rm microservicios_elasticsearch-data
+        docker compose up elasticsearch -d
+        ```
+      </Step>
+      <Step title="Verify it is healthy">
+        ```bash
+        curl http://localhost:9200/_cluster/health
+        ```
+        Expect `"status":"green"` or `"status":"yellow"`.
+      </Step>
+    </Steps>
+
+    <Warning>
+      Removing the `elasticsearch-data` volume permanently deletes all indexed logs. This is acceptable in development but should never be done in a production environment without a backup.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="No logs appearing in Kibana">
+    **Symptom:** Kibana Discover shows no documents, even after running requests against the API.
+
+    **Cause:** Logs flow from Spring Boot services → Logstash (TCP port 5044) → Elasticsearch → Kibana. A break anywhere in this chain will result in an empty index.
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Verify Logstash has started its pipeline">
+        Check the Logstash console output. You must see:
+        ```
+        Pipeline started
+        ```
+        If Logstash is not running, start it:
+        ```bash
+        cd "C:\Program Files\logstash-8.17.0"
+        bin\logstash.bat -f "<path-to-project>\logstash\pipeline.conf"
+        ```
+      </Step>
+      <Step title="Check TCP connectivity on port 5044">
+        ```bash
+        telnet localhost 5044
+        ```
+        A successful connection means Logstash is accepting logs. A refused connection means Logstash is not running or bound to a different address.
+      </Step>
+      <Step title="Wait for Elasticsearch to index">
+        Elasticsearch indexes documents in near-real-time, but there can be a 1–2 minute delay before documents appear in Kibana Discover. Trigger a few API requests to generate log events, then wait before refreshing Kibana.
+      </Step>
+      <Step title="Verify Elasticsearch is healthy">
+        ```bash
+        curl http://localhost:9200/_cluster/health
+        ```
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="Notification service not receiving events — Profile mismatch">
+    **Symptom:** Creating a product via `POST /api/inventory/products` succeeds (HTTP 201), but `notification-service` logs show no events received.
+
+    **Cause:** `inventory-service` and `notification-service` are running with different Spring profiles. If `inventory-service` publishes to RabbitMQ but `notification-service` is listening on a Kafka topic (or vice versa), the event is never consumed.
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Ensure both services use the same profile">
+        Both services must be started with **the same** broker profile:
+
+        ```bash
+        # RabbitMQ — both services
+        cd inventory-service && mvn spring-boot:run -Dspring-boot.run.profiles=rabbitmq
+        cd notification-service && mvn spring-boot:run -Dspring-boot.run.profiles=rabbitmq
+        ```
+
+        ```bash
+        # Kafka — both services
+        cd inventory-service && mvn spring-boot:run -Dspring-boot.run.profiles=kafka
+        cd notification-service && mvn spring-boot:run -Dspring-boot.run.profiles=kafka
+        ```
+      </Step>
+      <Step title="Verify notification-service logs after creating a product">
+        After a successful product creation, `notification-service` should log:
+
+        **RabbitMQ:**
+        ```
+        === NOTIFICACIÓN RECIBIDA ===
+        Nuevo producto creado:
+          ID:     ...
+          Nombre: ...
+        =============================
+        ```
+
+        **Kafka:**
+        ```
+        === NOTIFICACIÓN RECIBIDA (Kafka) ===
+        Nuevo producto creado:
+          ID:     ...
+          Nombre: ...
+        =====================================
+        ```
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="H2 Console shows no tables">
+    **Symptom:** Connecting to the H2 console shows an empty schema with no tables.
+
+    **Cause:** Each microservice uses its own isolated in-memory H2 database. Connecting with the wrong JDBC URL will connect to a different (empty) database instance.
+
+    **Fix:**
+
+    Use the correct JDBC URL for each service:
+
+    | Service | H2 Console URL | JDBC URL |
+    |---------|---------------|----------|
+    | Auth Service | `http://localhost:8083/h2-console` | `jdbc:h2:mem:authdb` |
+    | Inventory Service | `http://localhost:8082/h2-console` | `jdbc:h2:mem:inventorydb` |
+
+    For both services:
+    - **User:** `sa`
+    - **Password:** *(leave empty)*
+
+    <Warning>
+      These are in-memory databases. All data is lost when the service restarts. Do not connect to the Auth Service H2 console expecting to find Inventory Service tables — they are entirely separate databases.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Kafka topics not being created">
+    **Symptom:** `KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE: "true"` is set in `docker-compose.yml`, but topics are absent when you try to produce or consume messages.
+
+    **Cause:** The Kafka container's healthcheck (`kafka-topics.sh --list`) must pass before topics can be created. If a service attempts to produce a message before the broker is ready, the connection will fail and the auto-creation trigger will not fire.
+
+    **Fix:**
+
+    <Steps>
+      <Step title="Wait for the Kafka healthcheck to pass">
+        Monitor the container status:
+
+        ```bash
+        docker compose ps kafka
+        ```
+
+        Wait until the `STATUS` column shows `healthy` before starting services that depend on Kafka.
+      </Step>
+      <Step title="Verify the topic list manually">
+        ```bash
+        docker exec -it <kafka-container> kafka-topics.sh \
+          --bootstrap-server localhost:9092 \
+          --list
+        ```
+      </Step>
+      <Step title="Restart dependent services if topics are still missing">
+        If `inventory-service-kafka` or `notification-service-kafka` started before Kafka was healthy, restart them:
+
+        ```bash
+        docker compose --profile kafka restart inventory-service-kafka notification-service-kafka
+        ```
+      </Step>
+    </Steps>
+  </Accordion>
+
+</AccordionGroup>

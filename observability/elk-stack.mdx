@@ -1,0 +1,427 @@
+---
+title: "ELK Stack Logging"
+description: "Centralized log aggregation using Elasticsearch, Logstash, and Kibana with structured JSON logs."
+---
+
+Zipkin answers *how* a request flowed across services and *how long* each step took. The ELK stack answers *what happened inside each service* — exceptions, warnings, business events, and any structured data logged at runtime.
+
+The two systems are complementary. A typical debugging workflow combines them: find a slow or failed trace in Zipkin, copy the `traceId`, and search for all related log entries in Kibana.
+
+## Components
+
+| Component | Port | Function | Deployment |
+|-----------|------|----------|------------|
+| Elasticsearch | 9200 | Stores and indexes structured log documents | Docker |
+| Logstash | 5044 | Receives JSON logs via TCP, parses them, and forwards to Elasticsearch | Local installation |
+| Kibana | 5601 | Log visualization and search UI | Docker |
+
+## Log flow
+
+```
+Services Spring Boot
+    │
+    │  JSON logs via TCP (port 5044)
+    │  fields: traceId, spanId, service, level, message
+    │
+    ▼
+Logstash (localhost:5044)  ──────►  Elasticsearch (localhost:9200)
+    │                                       (daily indices: logs-YYYY.MM.dd)
+    └── pipeline.conf:
+        parses JSON, extracts MDC fields,
+        filters healthcheck noise
+    │
+    ▼
+Kibana (localhost:5601)
+    └── Discover, dashboards, ML anomaly detection
+```
+
+## Starting ELK with Docker Compose
+
+Elasticsearch and Kibana are defined in `docker-compose.yml` and start automatically with the other services:
+
+```bash
+# With RabbitMQ profile
+docker compose --profile rabbitmq up elasticsearch kibana -d
+
+# With Kafka profile
+docker compose --profile kafka up elasticsearch kibana -d
+```
+
+Wait for both containers to become healthy before starting Logstash. You can check status with:
+
+```bash
+curl http://localhost:9200/_cluster/health
+curl -f http://localhost:5601/api/status
+```
+
+Start Logstash separately from your local installation, pointing it at the project's pipeline:
+
+```bash
+cd "C:\Program Files\logstash-8.17.0"
+bin\logstash.bat -f "C:\path\to\project\logstash\pipeline.conf"
+```
+
+Logstash is ready when the console shows `Pipeline started`.
+
+## Elasticsearch memory configuration
+
+The Docker Compose configuration sets a 512 MB JVM heap and caps the container at 1 GB:
+
+```yaml
+elasticsearch:
+  image: elasticsearch:8.17.0
+  environment:
+    discovery.type: single-node
+    xpack.security.enabled: false
+    xpack.security.http.ssl.enabled: false
+    xpack.license.self_generated.type: basic
+    ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+  deploy:
+    resources:
+      limits:
+        memory: 1g
+```
+
+Security and SSL are disabled for development. Do not use this configuration in production.
+
+## Logstash pipeline
+
+The project ships a complete pipeline at `logstash/pipeline.conf`:
+
+```ruby
+# Pipeline de Logstash para microservicios
+# Recibe logs JSON via TCP (puerto 5044) y los envía a Elasticsearch
+
+input {
+  tcp {
+    port => 5044
+    codec => json_lines
+    # Los logs vienen en formato JSON estructurado
+  }
+}
+
+filter {
+  # Parsear timestamp si viene como string
+  date {
+    match => ["timestamp", "yyyy-MM-dd HH:mm:ss.SSS"]
+    target => "@timestamp"
+    remove_field => ["timestamp"]
+  }
+
+  # Extraer información del MDC (traceId, spanId, etc.)
+  if [mdc] {
+    mutate {
+      add_field => {
+        "traceId" => "%{[mdc][traceId]}"
+        "spanId" => "%{[mdc][spanId]}"
+        "service" => "%{[mdc][service]}"
+      }
+    }
+  }
+
+  # Limpiar campos innecesarios
+  mutate {
+    remove_field => ["mdc", "ndc", "contextMap", "contextStack"]
+  }
+
+  # Agregar campos útiles para Kibana
+  mutate {
+    add_field => {
+      "environment" => "development"
+      "source" => "spring-boot"
+    }
+  }
+
+  # Filtrar logs de healthchecks y métricas para no llenar ELK
+  if [logger_name] =~ /^org\.springframework\.boot\.actuate\./ or
+     [message] =~ /health|metrics|prometheus/ {
+    drop {}
+  }
+}
+
+output {
+  # Enviar a Elasticsearch
+  elasticsearch {
+    hosts => ["localhost:9200"]
+    index => "logs-%{+YYYY.MM.dd}"
+    # Crear índices diarios para mejor gestión
+  }
+
+  # También mostrar en stdout para debugging
+  stdout {
+    codec => rubydebug
+  }
+}
+```
+
+Key behaviors:
+- **Input**: Accepts `json_lines`-encoded TCP connections on port 5044.
+- **Timestamp**: Parses the `timestamp` field from the JSON payload and promotes it to `@timestamp`.
+- **MDC extraction**: Promotes `traceId`, `spanId`, and `service` out of the nested `mdc` object into top-level fields, making them filterable in Kibana.
+- **Noise filtering**: Drops log lines from Spring Boot Actuator endpoints (`/actuator/health`, `/actuator/metrics`, `/actuator/prometheus`) to avoid filling the index with routine probe traffic.
+- **Output**: Writes to daily rolling indices (`logs-YYYY.MM.dd`) and echoes each event to stdout for local debugging.
+
+## Logback configuration
+
+All services include a `logback-spring.xml` that configures two appenders. The `auth-service` and `inventory-service` configurations are identical:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <!-- Appender TCP para Logstash -->
+    <appender name="LOGSTASH" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+        <destination>localhost:5044</destination>
+        <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+            <providers>
+                <timestamp/>
+                <logLevel/>
+                <loggerName/>
+                <message/>
+                <mdc/>
+                <stackTrace/>
+            </providers>
+        </encoder>
+    </appender>
+
+    <!-- Appender para consola (desarrollo) -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%property{spring.application.name},%X{traceId},%X{spanId}] %highlight(%-5level) %cyan(%logger{36}) - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Configuración de logging -->
+    <springProfile name="default">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <!-- Configuración para desarrollo -->
+    <springProfile name="dev,development">
+        <logger name="com.uade.microservicios" level="DEBUG"/>
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+
+    <!-- Configuración para producción -->
+    <springProfile name="prod,production">
+        <logger name="com.uade.microservicios" level="INFO"/>
+        <root level="WARN">
+            <appender-ref ref="LOGSTASH"/>
+        </root>
+    </springProfile>
+</configuration>
+```
+
+The `LOGSTASH` appender uses `LogstashTcpSocketAppender` with `LoggingEventCompositeJsonEncoder`. It serializes each log event as a JSON object containing timestamp, level, logger name, message, MDC map (where `traceId` and `spanId` live), and stack trace if present.
+
+<Note>
+  The `LOGSTASH` appender is only active under the `prod` or `production` Spring profile. In the default and `dev` profiles, logs go to the console only. To enable ELK shipping in development, either activate the `prod` profile or add `<appender-ref ref="LOGSTASH"/>` to the `default` profile in `logback-spring.xml`.
+</Note>
+
+## Kibana setup
+
+<Steps>
+  <Step title="Open Kibana">
+    Navigate to **http://localhost:5601**. The first load may take 30–60 seconds as Kibana initializes.
+  </Step>
+
+  <Step title="Create an index pattern">
+    Go to **Management → Stack Management → Index Patterns** and click **Create index pattern**.
+
+    - **Index pattern name**: `logs-*`  
+      This matches all daily indices created by Logstash (`logs-2026.03.15`, `logs-2026.03.16`, etc.).
+    - **Timestamp field**: `@timestamp`
+
+    Click **Create index pattern**.
+  </Step>
+
+  <Step title="Open Discover">
+    Navigate to **Discover** in the left sidebar. Select the `logs-*` index pattern from the dropdown. Logs from all services will appear in the timeline view.
+  </Step>
+
+  <Step title="Add useful columns">
+    In the field list on the left, pin the following fields to the table by clicking the **+** icon next to each:
+
+    - `service` — which microservice emitted the log
+    - `level` — `ERROR`, `WARN`, `INFO`, `DEBUG`
+    - `traceId` — correlates with Zipkin
+    - `logger_name` — Java class that logged the event
+    - `message` — the log message
+  </Step>
+</Steps>
+
+## Searching and filtering
+
+Kibana's query bar accepts Kibana Query Language (KQL). The following field names are available because the Logstash pipeline promotes them from the MDC map:
+
+| Field | Values | Notes |
+|-------|--------|-------|
+| `service` | `api-gateway`, `auth-service`, `inventory-service`, `notification-service` | Extracted from `mdc.service` |
+| `level` | `ERROR`, `WARN`, `INFO`, `DEBUG` | From the JSON `logLevel` field |
+| `traceId` | hex string | From `mdc.traceId` |
+| `logger_name` | fully-qualified class name | From the JSON `loggerName` field |
+| `message` | free text | The log message body |
+
+<Tabs>
+  <Tab title="Filter by service">
+    Show all INFO-level logs from the API gateway:
+
+    ```
+    service:api-gateway AND level:INFO
+    ```
+
+    Show all errors across all services:
+
+    ```
+    level:ERROR
+    ```
+  </Tab>
+
+  <Tab title="Filter by traceId">
+    Find all log entries belonging to one request:
+
+    ```
+    traceId:6b3e44e01a7d4c00
+    ```
+
+    Or using a prefix wildcard:
+
+    ```
+    traceId:6b3e44e0*
+    ```
+  </Tab>
+
+  <Tab title="Search message content">
+    Find logs mentioning errors or exceptions:
+
+    ```
+    message:*error* OR message:*exception*
+    ```
+
+    Find logs related to a specific product operation:
+
+    ```
+    service:inventory-service AND message:*product*
+    ```
+  </Tab>
+</Tabs>
+
+## Correlating with Zipkin
+
+Because every log line includes the `traceId` from Micrometer Tracing, the two observability systems share a common key:
+
+1. Open Zipkin at **http://localhost:9411** and find a trace of interest (slow, failed, or unexpected).
+2. Click the trace to open the span waterfall. Copy the **Trace ID** shown at the top.
+3. Open Kibana at **http://localhost:5601**, open **Discover**, and enter the query:
+   ```
+   traceId:<paste-trace-id-here>
+   ```
+4. Kibana returns every log line from every service that participated in that request, in chronological order.
+
+<Tip>
+  Use Zipkin to identify *which* request had a problem and *where* the latency was. Use Kibana to read the detailed log messages, stack traces, and business data from that same request.
+</Tip>
+
+## Kibana Machine Learning
+
+Kibana's Elastic Machine Learning module is available in the free Basic license with limited features. It can be useful for proactive monitoring of the microservices ecosystem:
+
+- **Anomaly detection on logs**: Automatically alerts when a service generates more errors than its historical baseline.
+- **Latency spikes**: Identifies unusual increases in request processing time.
+- **Traffic pattern changes**: Detects abnormal request volumes or behavioral shifts.
+- **Memory leak signals**: Gradual degradation visible through metric trends.
+
+To create an anomaly detection job:
+
+1. Navigate to **Machine Learning** in the Kibana sidebar.
+2. Select **Anomaly Detection → Create job**.
+3. Choose the `logs-*` index pattern.
+4. Configure the job to analyze a metric such as log volume per `service`.
+5. Set up alerts to notify when anomalies are detected.
+
+<Note>
+  Advanced ML features (forecasting, advanced analytics) require a Gold or Platinum license. For development and learning purposes, the Basic tier is sufficient.
+</Note>
+
+## Kibana memory optimization
+
+If running on limited RAM, add the following to `config/kibana.yml`:
+
+```yaml
+# Reduce polling interval (less CPU)
+ops.interval: 5000
+
+# Limit maximum request payload
+server.maxPayloadBytes: 1048576
+
+# Disable usage telemetry
+telemetry.optIn: false
+```
+
+Kibana consumes approximately 200–400 MB of RAM in this configuration. The installed footprint on disk is ~900 MB–1.1 GB due to the embedded Node.js runtime and frontend libraries.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No logs appearing in Kibana">
+    Work through these checks in order:
+
+    1. Confirm Logstash is running and shows `Pipeline started` in its console output.
+    2. Verify the services are running and emitting logs to their own consoles — if the console is silent, Logstash will have nothing to receive.
+    3. Check that the `logback-spring.xml` in each service has the `LOGSTASH` appender active for the current Spring profile. By default, the appender is only active under `prod`/`production`.
+    4. Test TCP connectivity from the service host to Logstash:
+       ```bash
+       telnet localhost 5044
+       ```
+    5. Wait 1–2 minutes. Elasticsearch indexes documents asynchronously; logs may not appear instantly.
+    6. In Kibana Discover, verify the time range picker covers the period when logs were generated.
+  </Accordion>
+
+  <Accordion title="Elasticsearch not starting">
+    Inspect the container logs for the cause:
+
+    ```bash
+    docker logs $(docker ps -qf name=elasticsearch)
+    ```
+
+    Common causes: insufficient virtual memory (`vm.max_map_count` too low on Linux), corrupted data volume, or port conflict on 9200.
+
+    To reset the Elasticsearch data volume and start fresh:
+
+    ```bash
+    docker-compose down elasticsearch
+    docker volume rm microservicios_elasticsearch-data
+    docker-compose up elasticsearch -d
+    ```
+
+    <Warning>
+      Removing the volume deletes all indexed logs. Only do this in development when log data is not critical.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Logstash not connecting to Elasticsearch">
+    Verify Elasticsearch is healthy before starting Logstash:
+
+    ```bash
+    curl http://localhost:9200/_cluster/health
+    ```
+
+    Expected response:
+
+    ```json
+    {
+      "cluster_name": "docker-cluster",
+      "status": "green",
+      "timed_out": false,
+      ...
+    }
+    ```
+
+    If Elasticsearch returns `red` or the request times out, wait for the container healthcheck to pass before starting Logstash. Check the `pipeline.conf` output section — the `hosts` value must match the actual Elasticsearch address (`localhost:9200` for local, or the container hostname when both run in Docker).
+  </Accordion>
+</AccordionGroup>

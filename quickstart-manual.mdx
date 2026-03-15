@@ -1,0 +1,417 @@
+---
+title: "Manual Quickstart"
+description: "Run the microservices ecosystem without Docker for reduced memory usage."
+---
+
+Running the stack without Docker requires more initial setup but significantly reduces RAM consumption. This is recommended if you have 4–8 GB of available memory.
+
+## Prerequisites
+
+- **Java 21** — required by all Spring Boot services
+- **Maven 3.9+** — used to run each service
+- **Message broker** (choose one):
+  - **RabbitMQ**: requires [Erlang/OTP](https://www.erlang.org/downloads) and [RabbitMQ Server](https://www.rabbitmq.com/download.html)
+  - **Apache Kafka**: requires the [Kafka binary distribution](https://kafka.apache.org/downloads)
+- **Zipkin** — JAR downloaded from Maven Central (instructions below)
+- **Elasticsearch + Kibana** *(optional)* — for centralized log viewing
+
+## Memory comparison
+
+| Setup | Approximate RAM | Notes |
+|-------|----------------|-------|
+| Docker (full stack) | 4–6 GB | Includes all infrastructure containers |
+| Manual with RabbitMQ | 1.5–2 GB | Recommended for low-memory machines |
+| Manual with Kafka | 2–3 GB | Kafka + Zookeeper add ~400–600 MB |
+
+| Component | RAM usage |
+|-----------|----------|
+| RabbitMQ | 100–200 MB |
+| Kafka + Zookeeper | 400–600 MB |
+| Elasticsearch (dev config) | 256–512 MB |
+| Logstash | 100–200 MB |
+| Kibana | 200–400 MB |
+| Zipkin | 100–200 MB |
+| Spring Boot services (×4) | 300–500 MB |
+
+## Step 1 — Install and start a message broker
+
+<Tabs>
+  <Tab title="RabbitMQ">
+    <Steps>
+      <Step title="Install Erlang/OTP">
+        Download the Erlang OTP installer for your platform from [https://www.erlang.org/downloads](https://www.erlang.org/downloads) and run it. On Windows it installs to `C:\Program Files\erl-XX.X\`.
+      </Step>
+
+      <Step title="Install RabbitMQ Server">
+        Download RabbitMQ Server from [https://www.rabbitmq.com/download.html](https://www.rabbitmq.com/download.html) and install it.
+
+        On Windows, add the sbin directory to your PATH:
+
+        ```
+        C:\Program Files\RabbitMQ Server\rabbitmq_server-X.X.X\sbin\
+        ```
+      </Step>
+
+      <Step title="Enable the management plugin">
+        ```cmd
+        rabbitmq-plugins enable rabbitmq_management
+        ```
+      </Step>
+
+      <Step title="Start the RabbitMQ service">
+        ```cmd
+        rabbitmq-server start
+        ```
+      </Step>
+
+      <Step title="Verify">
+        Open [http://localhost:15672](http://localhost:15672) in your browser. Log in with `guest` / `guest`. The management console should load.
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="Apache Kafka">
+    <Steps>
+      <Step title="Download Kafka">
+        <CodeGroup>
+
+        ```powershell Windows PowerShell
+        mkdir C:\kafka
+        cd C:\kafka
+        Invoke-WebRequest -Uri "https://downloads.apache.org/kafka/3.6.0/kafka_2.13-3.6.0.tgz" -OutFile "kafka.tgz"
+        ```
+
+        </CodeGroup>
+      </Step>
+
+      <Step title="Extract the archive">
+        ```cmd
+        cd C:\kafka
+        tar -xzf kafka.tgz
+        cd kafka_2.13-3.6.0
+        ```
+      </Step>
+
+      <Step title="Configure Zookeeper data directory">
+        Edit `config\zookeeper.properties` and change:
+
+        ```
+        dataDir=C:/kafka/zookeeper-data
+        ```
+      </Step>
+
+      <Step title="Configure Kafka log directory">
+        Edit `config\server.properties` and change:
+
+        ```
+        log.dirs=C:/kafka/kafka-logs
+        ```
+      </Step>
+
+      <Step title="Create the data directories">
+        ```cmd
+        mkdir C:\kafka\zookeeper-data
+        mkdir C:\kafka\kafka-logs
+        ```
+      </Step>
+
+      <Step title="Start Zookeeper (terminal 1)">
+        ```cmd
+        cd C:\kafka\kafka_2.13-3.6.0
+        bin\windows\zookeeper-server-start.bat config\zookeeper.properties
+        ```
+      </Step>
+
+      <Step title="Start Kafka (terminal 2)">
+        ```cmd
+        cd C:\kafka\kafka_2.13-3.6.0
+        bin\windows\kafka-server-start.bat config\server.properties
+        ```
+      </Step>
+
+      <Step title="Verify">
+        ```cmd
+        cd C:\kafka\kafka_2.13-3.6.0
+        bin\windows\kafka-topics.bat --bootstrap-server localhost:9092 --list
+        ```
+
+        The command should return without errors (an empty list is expected on a fresh installation).
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Step 2 — Set up Zipkin
+
+<Steps>
+  <Step title="Create a directory and download the JAR">
+    <CodeGroup>
+
+    ```powershell Windows PowerShell
+    mkdir C:\zipkin
+    cd C:\zipkin
+    Invoke-WebRequest -Uri "https://repo1.maven.org/maven2/io/zipkin/zipkin-server/3.2.0/zipkin-server-3.2.0-exec.jar" -OutFile "zipkin.jar"
+    ```
+
+    ```bash Linux / macOS
+    mkdir ~/zipkin
+    cd ~/zipkin
+    curl -sSL https://repo1.maven.org/maven2/io/zipkin/zipkin-server/3.2.0/zipkin-server-3.2.0-exec.jar -o zipkin.jar
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Create a start script">
+    <CodeGroup>
+
+    ```cmd Windows CMD
+    echo java -jar zipkin.jar > start-zipkin.bat
+    ```
+
+    ```bash Linux / macOS
+    echo 'java -jar zipkin.jar' > start-zipkin.sh
+    chmod +x start-zipkin.sh
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Run Zipkin">
+    <CodeGroup>
+
+    ```cmd Windows CMD
+    cd C:\zipkin
+    start-zipkin.bat
+    ```
+
+    ```bash Linux / macOS
+    cd ~/zipkin
+    ./start-zipkin.sh
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Verify">
+    Open [http://localhost:9411](http://localhost:9411). The Zipkin UI should load.
+  </Step>
+</Steps>
+
+## Step 3 — Start the Spring Boot services
+
+Each service must be started in a separate terminal. Start them in the order listed below — Config Server must be fully up before the others can register.
+
+<Warning>
+  Config Server **must** be started with the `native` Spring profile. Without it, Spring attempts to use the `git` profile by default and fails with `Invalid config server configuration` because no Git repository is configured. The `native` profile tells Config Server to read configuration files from the local `config/` directory.
+</Warning>
+
+<Steps>
+  <Step title="Start Config Server (terminal 1)">
+    ```bash
+    cd config-server && mvn spring-boot:run -Dspring-boot.run.profiles=native
+    ```
+
+    Wait until the console shows the application started on port **8888** before continuing.
+  </Step>
+
+  <Step title="Start Eureka Server (terminal 2)">
+    ```bash
+    cd eureka-server && mvn spring-boot:run
+    ```
+
+    Wait until the console shows the application started on port **8761**. You can verify at [http://localhost:8761](http://localhost:8761).
+  </Step>
+
+  <Step title="Start Auth Service (terminal 3)">
+    ```bash
+    cd auth-service && mvn spring-boot:run
+    ```
+
+    Starts on port **8083**.
+  </Step>
+
+  <Step title="Start Inventory Service (terminal 4)">
+    Choose the profile that matches the broker you started in Step 1:
+
+    <Tabs>
+      <Tab title="RabbitMQ">
+        ```bash
+        cd inventory-service && mvn spring-boot:run -Dspring-boot.run.profiles=rabbitmq
+        ```
+      </Tab>
+      <Tab title="Apache Kafka">
+        ```bash
+        cd inventory-service && mvn spring-boot:run -Dspring-boot.run.profiles=kafka
+        ```
+      </Tab>
+    </Tabs>
+
+    Starts on port **8082**.
+  </Step>
+
+  <Step title="Start API Gateway (terminal 5)">
+    Start the gateway only after Config Server, Eureka, Auth Service, and Inventory Service are registered in Eureka.
+
+    ```bash
+    cd api-gateway && mvn spring-boot:run
+    ```
+
+    Starts on port **8080**.
+  </Step>
+
+  <Step title="Start Notification Service (terminal 6)">
+    Use the same broker profile you used for Inventory Service:
+
+    <Tabs>
+      <Tab title="RabbitMQ">
+        ```bash
+        cd notification-service && mvn spring-boot:run -Dspring-boot.run.profiles=rabbitmq
+        ```
+      </Tab>
+      <Tab title="Apache Kafka">
+        ```bash
+        cd notification-service && mvn spring-boot:run -Dspring-boot.run.profiles=kafka
+        ```
+      </Tab>
+    </Tabs>
+
+    Starts on port **8084**.
+  </Step>
+</Steps>
+
+## Step 4 — Verify health checks
+
+Confirm every service is running:
+
+<CodeGroup>
+
+```bash Linux / macOS
+# All services registered in Eureka
+curl http://localhost:8761/eureka/apps
+
+# Individual health endpoints
+curl http://localhost:8080/actuator/health  # API Gateway
+curl http://localhost:8083/actuator/health  # Auth Service
+curl http://localhost:8082/actuator/health  # Inventory Service
+curl http://localhost:8084/actuator/health  # Notification Service
+```
+
+```cmd Windows CMD
+curl http://localhost:8761/eureka/apps
+curl http://localhost:8080/actuator/health
+curl http://localhost:8083/actuator/health
+curl http://localhost:8082/actuator/health
+curl http://localhost:8084/actuator/health
+```
+
+</CodeGroup>
+
+For the message broker:
+
+<Tabs>
+  <Tab title="RabbitMQ">
+    ```bash
+    curl http://localhost:15672/api/overview -u guest:guest
+    ```
+  </Tab>
+  <Tab title="Apache Kafka">
+    ```cmd
+    cd C:\kafka\kafka_2.13-3.6.0
+    bin\windows\kafka-topics.bat --bootstrap-server localhost:9092 --list
+    ```
+  </Tab>
+</Tabs>
+
+## Step 5 — End-to-end test
+
+Run a full login → create product flow to verify the entire system:
+
+<Steps>
+  <Step title="Obtain a JWT token">
+    <CodeGroup>
+
+    ```bash Linux / macOS
+    TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
+      -H "Content-Type: application/json" \
+      -d '{"username":"admin","password":"admin123"}' | jq -r '.token')
+    ```
+
+    ```cmd Windows CMD
+    curl -X POST http://localhost:8080/auth/login -H "Content-Type: application/json" -d "{\"username\":\"admin\",\"password\":\"admin123\"}"
+    ```
+
+    ```powershell Windows PowerShell
+    $response = Invoke-RestMethod -Uri "http://localhost:8080/auth/login" -Method POST -ContentType "application/json" -Body '{"username":"admin","password":"admin123"}'
+    $token = $response.token
+    ```
+
+    </CodeGroup>
+
+    Expected response:
+
+    ```json
+    {
+      "token": "eyJhbGciOiJIUzM4NCJ9...",
+      "type": "Bearer",
+      "expiresIn": 3600
+    }
+    ```
+  </Step>
+
+  <Step title="Create a product">
+    <CodeGroup>
+
+    ```bash Linux / macOS
+    curl -X POST http://localhost:8080/api/inventory/products \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"Producto Test","quantity":10,"price":99.99}'
+    ```
+
+    ```cmd Windows CMD
+    curl -X POST http://localhost:8080/api/inventory/products -H "Authorization: Bearer TOKEN_AQUI" -H "Content-Type: application/json" -d "{\"name\":\"Producto Test\",\"quantity\":10,\"price\":99.99}"
+    ```
+
+    ```powershell Windows PowerShell
+    Invoke-RestMethod -Uri "http://localhost:8080/api/inventory/products" -Method POST -ContentType "application/json" -Headers @{ Authorization = "Bearer $token" } -Body '{"name":"Producto Test","quantity":10,"price":99.99}'
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Verify the notification event in the Notification Service logs">
+    Check the terminal running `notification-service`. You should see:
+
+    <Tabs>
+      <Tab title="RabbitMQ">
+        ```
+        === NOTIFICACIÓN RECIBIDA ===
+        Nuevo producto creado:
+          ID:       4
+          Nombre:   Producto Test
+          ...
+        =============================
+        ```
+      </Tab>
+      <Tab title="Apache Kafka">
+        ```
+        === NOTIFICACIÓN RECIBIDA (Kafka) ===
+        Nuevo producto creado:
+          ID:       4
+          Nombre:   Producto Test
+          ...
+        =====================================
+        ```
+      </Tab>
+    </Tabs>
+  </Step>
+
+  <Step title="Check distributed traces in Zipkin">
+    Open [http://localhost:9411](http://localhost:9411) and search for traces. You should see the full request chain: `api-gateway` → `inventory-service` → `notification-service`.
+  </Step>
+</Steps>
+
+<Tip>
+  To minimize memory usage, start only the components you need. If you are not using distributed tracing, skip Zipkin. If you are not using centralized logs, skip Elasticsearch, Logstash, and Kibana. RabbitMQ is lighter than Kafka and is the recommended broker for low-memory setups.
+</Tip>

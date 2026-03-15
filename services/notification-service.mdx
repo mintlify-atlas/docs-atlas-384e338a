@@ -1,0 +1,230 @@
+---
+title: "Notification Service"
+description: "Event consumer service that listens for ProductCreatedEvent messages from RabbitMQ or Kafka."
+---
+
+The Notification Service is a stateless consumer. It listens on the active message broker for `ProductCreatedEvent` messages published by the Inventory Service and logs a notification for each one. It has no persistence layer.
+
+## Overview
+
+| Property | Value |
+|----------|-------|
+| **Port** | `8084` |
+| **Spring application name** | `notification-service` |
+| **Spring Profiles** | `rabbitmq` or `kafka` |
+| **Persistence** | None |
+| **Health check** | `GET /actuator/health` |
+
+## Configuration
+
+```yaml
+# notification-service/src/main/resources/application.yml
+server:
+  port: 8084
+
+spring:
+  application:
+    name: notification-service
+
+eureka:
+  instance:
+    prefer-ip-address: true
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: http://localhost:9411/api/v2/spans
+
+logging:
+  pattern:
+    correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "
+```
+
+<Note>
+  This service has `sampling.probability: 1.0` — all events are traced. This is useful for verifying async event flows in Zipkin.
+</Note>
+
+## Spring Profiles
+
+The active profile determines which listener bean is created. The profile must match the one used by `inventory-service`:
+
+| Profile | Listener | Queue / Topic |
+|---------|----------|---------------|
+| `rabbitmq` | `ProductEventListener` | `product.created.queue` |
+| `kafka` | `KafkaProductEventListener` | `product-created` (group: `notification-group`) |
+
+## RabbitMQ listener
+
+```java
+@Component
+@Profile("rabbitmq")
+public class ProductEventListener {
+
+    private static final Logger log = LoggerFactory.getLogger(ProductEventListener.class);
+
+    @RabbitListener(queues = "product.created.queue")
+    public void handleProductCreated(ProductCreatedEvent event) {
+        log.info("=== NOTIFICACIÓN RECIBIDA ===");
+        log.info("Nuevo producto creado:");
+        log.info("  ID:       {}", event.getProductId());
+        log.info("  Nombre:   {}", event.getName());
+        log.info("  Cantidad: {}", event.getQuantity());
+        log.info("  Precio:   ${}", event.getPrice());
+        log.info("  Fecha:    {}", event.getTimestamp());
+        log.info("=============================");
+    }
+}
+```
+
+## Kafka listener
+
+```java
+@Component
+@Profile("kafka")
+public class KafkaProductEventListener {
+
+    private static final Logger log = LoggerFactory.getLogger(KafkaProductEventListener.class);
+
+    @KafkaListener(topics = "product-created", groupId = "notification-group")
+    public void handleProductCreated(ProductCreatedEvent event) {
+        log.info("=== NOTIFICACIÓN RECIBIDA (Kafka) ===");
+        log.info("Nuevo producto creado:");
+        log.info("  ID:       {}", event.getProductId());
+        log.info("  Nombre:   {}", event.getName());
+        log.info("  Cantidad: {}", event.getQuantity());
+        log.info("  Precio:   ${}", event.getPrice());
+        log.info("  Fecha:    {}", event.getTimestamp());
+        log.info("=====================================");
+    }
+}
+```
+
+## Verifying it works
+
+Create a product via the API Gateway. The notification-service logs will immediately show:
+
+<Tabs>
+  <Tab title="RabbitMQ output">
+    ```
+    === NOTIFICACIÓN RECIBIDA ===
+    Nuevo producto creado:
+      ID:       4
+      Nombre:   Monitor
+      Cantidad: 15
+      Precio:   $299.99
+      Fecha:    2026-03-15T10:30:00
+    =============================
+    ```
+  </Tab>
+  <Tab title="Kafka output">
+    ```
+    === NOTIFICACIÓN RECIBIDA (Kafka) ===
+    Nuevo producto creado:
+      ID:       4
+      Nombre:   Monitor
+      Cantidad: 15
+      Precio:   $299.99
+      Fecha:    2026-03-15T10:30:00
+    =====================================
+    ```
+  </Tab>
+</Tabs>
+
+To trigger this:
+
+```bash
+# 1. Get a token
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' | jq -r '.token')
+
+# 2. Create a product
+curl -X POST http://localhost:8080/api/inventory/products \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Monitor","quantity":15,"price":299.99}'
+```
+
+## Starting the service
+
+<Note>
+  Use the **same profile** as `inventory-service`. Mixing profiles (e.g., inventory on `rabbitmq` and notification on `kafka`) means events are published to RabbitMQ but no listener is active on it.
+</Note>
+
+<Tabs>
+  <Tab title="Docker (RabbitMQ)">
+    ```bash
+    docker compose --profile rabbitmq up --build
+    ```
+
+    Docker Compose sets:
+    ```yaml
+    environment:
+      SPRING_PROFILES_ACTIVE: rabbitmq
+      SPRING_RABBITMQ_HOST: rabbitmq
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
+    ```
+  </Tab>
+  <Tab title="Docker (Kafka)">
+    ```bash
+    docker compose --profile kafka up --build
+    ```
+
+    Docker Compose sets:
+    ```yaml
+    environment:
+      SPRING_PROFILES_ACTIVE: kafka
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+      MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
+    ```
+  </Tab>
+  <Tab title="Manual (bash)">
+    ```bash
+    # Terminal 6 — same profile as inventory-service
+    cd notification-service
+    mvn spring-boot:run -Dspring-boot.run.profiles=rabbitmq
+    # or for Kafka:
+    # mvn spring-boot:run -Dspring-boot.run.profiles=kafka
+    ```
+  </Tab>
+  <Tab title="Manual (CMD)">
+    ```cmd
+    cd notification-service
+    mvn spring-boot:run -Dspring-boot.run.profiles=rabbitmq
+    rem or for Kafka:
+    rem mvn spring-boot:run -Dspring-boot.run.profiles=kafka
+    ```
+  </Tab>
+</Tabs>
+
+## Key dependencies
+
+| Dependency | Purpose |
+|------------|---------|
+| `spring-boot-starter-web` | Embedded server, actuator exposure |
+| `spring-boot-starter-amqp` | `@RabbitListener` and RabbitMQ connection |
+| `spring-kafka` | `@KafkaListener` and Kafka consumer config |
+| `spring-cloud-starter-netflix-eureka-client` | Service registration |
+| `micrometer-tracing-bridge-brave` + `zipkin-reporter-brave` | Distributed tracing |
+| `logstash-logback-encoder` 7.4 | JSON log shipping to Logstash |
+
+## Health check
+
+```bash
+curl http://localhost:8084/actuator/health
+```
+
+<Card title="Inventory Service" href="/services/inventory-service">
+  Publishes the ProductCreatedEvent consumed by this service.
+</Card>
+<Card title="Event-Driven Architecture" href="/architecture/event-driven">
+  Full diagram of the async event flow between services.
+</Card>

@@ -1,0 +1,274 @@
+---
+title: "Inventory API"
+description: "Product management endpoints — all require a valid JWT Bearer token."
+---
+
+## Overview
+
+| | |
+|---|---|
+| **Base URL** | `http://localhost:8080/api/inventory` |
+| **Authentication** | `Authorization: Bearer <token>` required on all endpoints |
+
+<Note>
+  All requests must go through the **API Gateway** on port `8080`. The Gateway validates the JWT token before forwarding the request to the inventory service (port `8082`). Direct calls to the inventory service on port `8082` bypass the Gateway but still require a valid JWT.
+</Note>
+
+---
+
+## GET /api/inventory/products
+
+Returns all products currently stored in the inventory.
+
+### Authentication
+
+Required — `Authorization: Bearer <token>`
+
+### Response body
+
+An array of Product objects.
+
+<ResponseField name="id" type="number">
+  Auto-generated identifier assigned by the database.
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Product name.
+</ResponseField>
+
+<ResponseField name="quantity" type="number">
+  Available stock quantity (integer).
+</ResponseField>
+
+<ResponseField name="price" type="number">
+  Product price (decimal).
+</ResponseField>
+
+### Code examples
+
+<Tabs>
+  <Tab title="Linux / macOS / Git Bash">
+    ```bash
+    TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
+      -H "Content-Type: application/json" \
+      -d '{"username":"admin","password":"admin123"}' | jq -r '.token')
+
+    curl -X GET http://localhost:8080/api/inventory/products \
+      -H "Authorization: Bearer $TOKEN"
+    ```
+  </Tab>
+  <Tab title="Windows CMD">
+    ```cmd
+    curl -X GET http://localhost:8080/api/inventory/products -H "Authorization: Bearer TOKEN_AQUI"
+    ```
+    > Replace `TOKEN_AQUI` with the token obtained from `/auth/login`.
+  </Tab>
+  <Tab title="Windows PowerShell">
+    ```powershell
+    $response = Invoke-RestMethod -Uri "http://localhost:8080/auth/login" -Method POST -ContentType "application/json" -Body '{"username":"admin","password":"admin123"}'
+    $token = $response.token
+    Invoke-RestMethod -Uri "http://localhost:8080/api/inventory/products" -Headers @{ Authorization = "Bearer $token" }
+    ```
+  </Tab>
+</Tabs>
+
+### Example response
+
+```json
+[
+  {
+    "id": 1,
+    "name": "Laptop",
+    "quantity": 10,
+    "price": 999.99
+  },
+  {
+    "id": 2,
+    "name": "Mouse",
+    "quantity": 50,
+    "price": 29.99
+  }
+]
+```
+
+---
+
+## GET /api/inventory/products/\{id\}
+
+Returns a single product by its ID.
+
+### Authentication
+
+Required — `Authorization: Bearer <token>`
+
+### Path parameters
+
+<ParamField path="id" type="number" required>
+  The product's auto-generated identifier.
+</ParamField>
+
+### Response body
+
+A single Product object (same fields as the list endpoint above).
+
+### Code example
+
+<Tabs>
+  <Tab title="Linux / macOS / Git Bash">
+    ```bash
+    curl -X GET http://localhost:8080/api/inventory/products/1 \
+      -H "Authorization: Bearer $TOKEN"
+    ```
+  </Tab>
+  <Tab title="Windows CMD">
+    ```cmd
+    curl -X GET http://localhost:8080/api/inventory/products/1 -H "Authorization: Bearer TOKEN_AQUI"
+    ```
+  </Tab>
+  <Tab title="Windows PowerShell">
+    ```powershell
+    Invoke-RestMethod -Uri "http://localhost:8080/api/inventory/products/1" -Headers @{ Authorization = "Bearer $token" }
+    ```
+  </Tab>
+</Tabs>
+
+### Example response
+
+```json
+{
+  "id": 1,
+  "name": "Laptop",
+  "quantity": 10,
+  "price": 999.99
+}
+```
+
+### Error responses
+
+| Status | Meaning |
+|--------|---------|
+| `404 Not Found` | No product exists with the given ID. |
+
+---
+
+## POST /api/inventory/products
+
+Creates a new product and saves it to the inventory. After a successful save, a `ProductCreatedEvent` is published to the active message broker (RabbitMQ or Kafka). The `notification-service` consumes this event and logs the new product details.
+
+### Authentication
+
+Required — `Authorization: Bearer <token>`
+
+### Request body
+
+<ParamField body="name" type="string" required>
+  Product name.
+</ParamField>
+
+<ParamField body="quantity" type="number" required>
+  Initial stock quantity (integer).
+</ParamField>
+
+<ParamField body="price" type="number" required>
+  Product price (decimal).
+</ParamField>
+
+### Response body
+
+The created Product object, including the auto-assigned `id`.
+
+### Side effects
+
+Publishes a `ProductCreatedEvent` to the active message broker:
+
+- **RabbitMQ** (`--profile rabbitmq`) — event sent to a RabbitMQ exchange/queue.
+- **Kafka** (`--profile kafka`) — event sent to the `product-created` topic.
+
+In both cases the `notification-service` consumes the event and logs a notification.
+
+### Code examples
+
+<Tabs>
+  <Tab title="Linux / macOS / Git Bash">
+    ```bash
+    curl -X POST http://localhost:8080/api/inventory/products \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"Monitor","quantity":15,"price":299.99}'
+    ```
+  </Tab>
+  <Tab title="Windows CMD">
+    ```cmd
+    curl -X POST http://localhost:8080/api/inventory/products -H "Authorization: Bearer TOKEN_AQUI" -H "Content-Type: application/json" -d "{\"name\":\"Monitor\",\"quantity\":15,\"price\":299.99}"
+    ```
+  </Tab>
+  <Tab title="Windows PowerShell">
+    ```powershell
+    Invoke-RestMethod -Uri "http://localhost:8080/api/inventory/products" -Method POST -ContentType "application/json" -Headers @{ Authorization = "Bearer $token" } -Body '{"name":"Monitor","quantity":15,"price":299.99}'
+    ```
+  </Tab>
+</Tabs>
+
+### Example request body
+
+```json
+{
+  "name": "Monitor",
+  "quantity": 15,
+  "price": 299.99
+}
+```
+
+### Example response
+
+```json
+{
+  "id": 4,
+  "name": "Monitor",
+  "quantity": 15,
+  "price": 299.99
+}
+```
+
+---
+
+## Common error responses
+
+| Status | Meaning |
+|--------|---------|
+| `401 Unauthorized` | Missing or invalid JWT token. |
+| `404 Not Found` | Product with the given ID does not exist. |
+
+---
+
+## End-to-end example
+
+The following sequence authenticates, creates a product, and then lists all products:
+
+```bash
+# Step 1: Get token
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}' | jq -r '.token')
+
+# Step 2: Create a product
+curl -X POST http://localhost:8080/api/inventory/products \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Monitor","quantity":15,"price":299.99}'
+
+# Step 3: List all products
+curl -X GET http://localhost:8080/api/inventory/products \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+After Step 2 completes, check the `notification-service` logs for a message similar to:
+
+```
+=== NOTIFICACIÓN RECIBIDA ===
+Nuevo producto creado:
+  ID:       4
+  Nombre:   Monitor
+  ...
+=============================
+```

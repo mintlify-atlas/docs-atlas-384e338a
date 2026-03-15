@@ -1,0 +1,263 @@
+---
+title: "Inventory Service"
+description: "Product management microservice implementing hexagonal architecture with async event publishing."
+---
+
+The Inventory Service manages the product catalog. It is built with a Hexagonal (Ports and Adapters) architecture, acts as an OAuth2 Resource Server that validates JWT tokens directly, and publishes a `ProductCreatedEvent` to the active message broker whenever a product is created.
+
+## Overview
+
+| Property | Value |
+|----------|-------|
+| **Port** | `8082` |
+| **Spring application name** | `inventory-service` |
+| **Database** | H2 in-memory (`inventorydb`) |
+| **H2 Console** | [http://localhost:8082/h2-console](http://localhost:8082/h2-console) |
+| **JDBC URL** | `jdbc:h2:mem:inventorydb` |
+| **DB Username** | `sa` |
+| **DB Password** | *(empty)* |
+| **Spring Profiles** | `rabbitmq` or `kafka` |
+| **Health check** | `GET /actuator/health` |
+
+## Configuration
+
+```yaml
+# inventory-service/src/main/resources/application.yml
+server:
+  port: 8082
+
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: jdbc:h2:mem:inventorydb
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: true
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    show-sql: true
+
+eureka:
+  instance:
+    prefer-ip-address: true
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+
+jwt:
+  secret: MiClaveSecretaParaJWT_MuyLarga_Y_Segura_123456789
+
+management:
+  tracing:
+    sampling:
+      probability: 0.0
+
+logging:
+  pattern:
+    correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "
+```
+
+<Warning>
+  The `jwt.secret` must match the value in `auth-service` and `api-gateway`. All three services must use the same secret or JWT validation will fail.
+</Warning>
+
+## API endpoints
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| `GET` | `/api/inventory/products` | List all products | Required |
+| `GET` | `/api/inventory/products/{id}` | Get product by ID | Required |
+| `POST` | `/api/inventory/products` | Create a new product | Required |
+
+All requests must include a valid `Authorization: Bearer <token>` header obtained from the Auth Service. See the [API Reference](/api-reference) for full request/response details.
+
+### Source — InventoryController.java
+
+```java
+@RestController
+@RequestMapping("/api/inventory")
+public class InventoryController {
+
+    private final ProductUseCase productUseCase;
+
+    public InventoryController(ProductUseCase productUseCase) {
+        this.productUseCase = productUseCase;
+    }
+
+    @GetMapping("/products")
+    public ResponseEntity<List<Product>> getAllProducts() {
+        return ResponseEntity.ok(productUseCase.getAllProducts());
+    }
+
+    @GetMapping("/products/{id}")
+    public ResponseEntity<Product> getProduct(@PathVariable Long id) {
+        return productUseCase.getProductById(id)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    @PostMapping("/products")
+    public ResponseEntity<Product> createProduct(@RequestBody Product product) {
+        return ResponseEntity.ok(productUseCase.createProduct(product));
+    }
+}
+```
+
+## Product domain model
+
+The `Product` class in the domain layer is a pure POJO — no JPA annotations:
+
+```java
+// domain/model/Product.java
+public class Product {
+
+    private Long id;
+    private String name;
+    private Integer quantity;
+    private Double price;
+
+    // constructors, getters ...
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `Long` | Auto-generated identifier |
+| `name` | `String` | Product name |
+| `quantity` | `Integer` | Stock quantity |
+| `price` | `Double` | Unit price |
+
+## Seed data
+
+`DataInitializer` runs on startup and seeds three products if the database is empty:
+
+```java
+@Component
+public class DataInitializer implements CommandLineRunner {
+
+    @Override
+    public void run(String... args) {
+        if (productRepositoryPort.count() == 0) {
+            productRepositoryPort.save(new Product("Laptop", 10, 999.99));
+            productRepositoryPort.save(new Product("Mouse", 50, 29.99));
+            productRepositoryPort.save(new Product("Teclado", 30, 79.99));
+        }
+    }
+}
+```
+
+| Name | Quantity | Price |
+|------|----------|-------|
+| Laptop | 10 | $999.99 |
+| Mouse | 50 | $29.99 |
+| Teclado | 30 | $79.99 |
+
+## Hexagonal architecture
+
+The service follows the Ports and Adapters pattern. The domain has zero framework dependencies:
+
+```
+domain/
+  model/Product.java             ← Pure POJO
+  port/in/ProductUseCase.java    ← Inbound port (interface)
+  port/out/ProductRepositoryPort.java  ← Outbound port (interface)
+
+application/
+  service/ProductService.java    ← Implements ProductUseCase
+
+infrastructure/
+  adapter/in/web/
+    InventoryController.java     ← REST adapter (calls ProductUseCase)
+  adapter/out/persistence/
+    ProductJpaEntity.java        ← JPA entity (infrastructure only)
+    ProductJpaRepository.java    ← Spring Data JPA
+    ProductPersistenceAdapter.java ← Implements ProductRepositoryPort
+    ProductMapper.java           ← Maps domain ↔ JPA
+  adapter/out/messaging/
+    RabbitMQPublisherAdapter.java  ← @Profile("rabbitmq")
+    KafkaPublisherAdapter.java     ← @Profile("kafka")
+  config/
+    SecurityConfig.java
+    DataInitializer.java
+```
+
+See [Hexagonal Architecture](/architecture/hexagonal) for a full walkthrough.
+
+## Messaging — async event publishing
+
+When a product is created, `ProductService` publishes a `ProductCreatedEvent` through the `EventPublisherPort` interface. The concrete adapter is selected by the active Spring profile:
+
+| Profile | Adapter | Broker |
+|---------|---------|--------|
+| `rabbitmq` | `RabbitMQPublisherAdapter` | RabbitMQ exchange + queue |
+| `kafka` | `KafkaPublisherAdapter` | Kafka topic `product-created` |
+
+See [Event-Driven Architecture](/architecture/event-driven) for the full event flow.
+
+## Spring Profiles
+
+<Tabs>
+  <Tab title="RabbitMQ">
+    ```bash
+    # Manual
+    cd inventory-service
+    mvn spring-boot:run -Dspring-boot.run.profiles=rabbitmq
+    ```
+
+    Docker Compose (profile `rabbitmq`) sets:
+    ```yaml
+    environment:
+      SPRING_PROFILES_ACTIVE: rabbitmq
+      SPRING_RABBITMQ_HOST: rabbitmq
+    ```
+  </Tab>
+  <Tab title="Kafka">
+    ```bash
+    # Manual
+    cd inventory-service
+    mvn spring-boot:run -Dspring-boot.run.profiles=kafka
+    ```
+
+    Docker Compose (profile `kafka`) sets:
+    ```yaml
+    environment:
+      SPRING_PROFILES_ACTIVE: kafka
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  The profile used here must match the profile used for `notification-service`.
+</Note>
+
+## Key dependencies
+
+| Dependency | Purpose |
+|------------|---------|
+| `spring-boot-starter-web` | REST controllers |
+| `spring-boot-starter-data-jpa` + `h2` | JPA persistence layer (infrastructure only) |
+| `spring-boot-starter-oauth2-resource-server` | JWT validation |
+| `spring-boot-starter-amqp` | RabbitMQ publisher adapter |
+| `spring-kafka` | Kafka publisher adapter |
+| `spring-cloud-starter-netflix-eureka-client` | Service registration |
+| `micrometer-tracing-bridge-brave` + `zipkin-reporter-brave` | Distributed tracing |
+| `logstash-logback-encoder` 7.4 | JSON log shipping |
+
+## Health check
+
+```bash
+curl http://localhost:8082/actuator/health
+```
+
+<Card title="Notification Service" href="/services/notification-service">
+  Consumes the ProductCreatedEvent published by this service.
+</Card>
+<Card title="Hexagonal Architecture" href="/architecture/hexagonal">
+  Detailed explanation of the Ports and Adapters pattern used here.
+</Card>

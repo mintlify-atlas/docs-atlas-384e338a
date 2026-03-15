@@ -1,0 +1,261 @@
+---
+title: "Event-Driven Architecture"
+description: "Asynchronous messaging between services using RabbitMQ or Apache Kafka, switchable via Spring Profiles."
+---
+
+When a product is created in the `inventory-service`, the service publishes a `ProductCreatedEvent` to the active message broker. The `notification-service` consumes the event and logs the notification. The two services are fully decoupled — neither knows about the other's existence.
+
+The broker is selected at runtime via a **Spring Profile**. No code changes are required to switch between RabbitMQ and Kafka.
+
+## Event flow
+
+```
+┌──────────────────┐    POST /products    ┌──────────────────────┐
+│   API Gateway    │ ──────────────────── │   inventory-service   │
+│   (port 8080)    │                      │    (port 8082)        │
+└──────────────────┘                      └──────────┬───────────┘
+                                                     │
+                                            1. Saves to H2
+                                            2. Publishes event
+                                                     │
+                                          ┌──────────▼───────────┐
+                                          │   Message Broker      │
+                                          │                       │
+                                          │ ┌─────────────────┐   │
+                                          │ │ Profile:rabbitmq │   │
+                                          │ │ Exchange + Queue │   │
+                                          │ └─────────────────┘   │
+                                          │          OR           │
+                                          │ ┌─────────────────┐   │
+                                          │ │ Profile: kafka   │   │
+                                          │ │ Topic:           │   │
+                                          │ │ product-created  │   │
+                                          │ └─────────────────┘   │
+                                          └──────────┬───────────┘
+                                                     │
+                                            Consumes event
+                                                     │
+                                          ┌──────────▼───────────┐
+                                          │ notification-service  │
+                                          │   (port 8084)         │
+                                          │                       │
+                                          │ Logs the notification │
+                                          │ of the new product    │
+                                          └──────────────────────┘
+```
+
+## Broker selection
+
+| Docker command | Broker | Spring Profile |
+|----------------|--------|----------------|
+| `docker compose --profile rabbitmq up --build` | RabbitMQ | `rabbitmq` |
+| `docker compose --profile kafka up --build` | Apache Kafka (KRaft) | `kafka` |
+
+Both `inventory-service` and `notification-service` must run with the same profile. In `docker-compose.yml`, the profile-specific service definitions (`inventory-service-rabbitmq`, `inventory-service-kafka`, etc.) set `SPRING_PROFILES_ACTIVE` accordingly.
+
+<Note>
+  Switching brokers requires only a profile change — no code modifications. The domain and application layers are completely unaware of which broker is active. This is a direct consequence of the hexagonal architecture: `EventPublisherPort` is an interface, and each broker has its own adapter implementation.
+</Note>
+
+## RabbitMQ vs Kafka
+
+<Tabs>
+  <Tab title="RabbitMQ">
+    ### Configuration
+
+    RabbitMQ uses an exchange + queue + binding pattern. The relevant configuration files are:
+
+    - `inventory-service`: `infrastructure/adapter/out/messaging/RabbitMQConfig.java` — declares the exchange, queue, and binding
+    - `inventory-service`: `infrastructure/adapter/out/messaging/RabbitMQPublisherAdapter.java` — publishes events
+    - `notification-service`: `config/RabbitMQConfig.java` — consumer-side queue configuration
+    - `notification-service`: `listener/ProductEventListener.java` — consumes events
+
+    ### Consumer listener
+
+    ```java title="notification-service/.../listener/ProductEventListener.java"
+    package com.uade.notification.listener;
+
+    import com.uade.notification.event.ProductCreatedEvent;
+    import org.slf4j.Logger;
+    import org.slf4j.LoggerFactory;
+    import org.springframework.amqp.rabbit.annotation.RabbitListener;
+    import org.springframework.context.annotation.Profile;
+    import org.springframework.stereotype.Component;
+
+    @Component
+    @Profile("rabbitmq")
+    public class ProductEventListener {
+
+        private static final Logger log = LoggerFactory.getLogger(ProductEventListener.class);
+
+        @RabbitListener(queues = "product.created.queue")
+        public void handleProductCreated(ProductCreatedEvent event) {
+            log.info("=== NOTIFICACIÓN RECIBIDA ===");
+            log.info("Nuevo producto creado:");
+            log.info("  ID:       {}", event.getProductId());
+            log.info("  Nombre:   {}", event.getName());
+            log.info("  Cantidad: {}", event.getQuantity());
+            log.info("  Precio:   ${}", event.getPrice());
+            log.info("  Fecha:    {}", event.getTimestamp());
+            log.info("=============================");
+        }
+    }
+    ```
+
+    ### Verifying delivery
+
+    After creating a product, look for the following output in the `notification-service` logs:
+
+    ```text
+    === NOTIFICACIÓN RECIBIDA ===
+    Nuevo producto creado:
+      ID:       4
+      Nombre:   Monitor
+      ...
+    =============================
+    ```
+
+    The RabbitMQ Management UI is available at `http://localhost:15672` (credentials: `guest` / `guest`). You can inspect queues, message rates, and bindings there.
+  </Tab>
+  <Tab title="Kafka">
+    ### Configuration
+
+    Kafka uses a topic-based model with KRaft mode (no Zookeeper). The relevant configuration files are:
+
+    - `inventory-service`: `infrastructure/adapter/out/messaging/KafkaConfig.java` — producer configuration
+    - `inventory-service`: `infrastructure/adapter/out/messaging/KafkaPublisherAdapter.java` — publishes events to topic `product-created`
+    - `notification-service`: `config/KafkaConfig.java` — consumer configuration
+    - `notification-service`: `listener/KafkaProductEventListener.java` — consumes events
+
+    ### Consumer listener
+
+    ```java title="notification-service/.../listener/KafkaProductEventListener.java"
+    package com.uade.notification.listener;
+
+    import com.uade.notification.event.ProductCreatedEvent;
+    import org.slf4j.Logger;
+    import org.slf4j.LoggerFactory;
+    import org.springframework.context.annotation.Profile;
+    import org.springframework.kafka.annotation.KafkaListener;
+    import org.springframework.stereotype.Component;
+
+    @Component
+    @Profile("kafka")
+    public class KafkaProductEventListener {
+
+        private static final Logger log = LoggerFactory.getLogger(KafkaProductEventListener.class);
+
+        @KafkaListener(topics = "product-created", groupId = "notification-group")
+        public void handleProductCreated(ProductCreatedEvent event) {
+            log.info("=== NOTIFICACIÓN RECIBIDA (Kafka) ===");
+            log.info("Nuevo producto creado:");
+            log.info("  ID:       {}", event.getProductId());
+            log.info("  Nombre:   {}", event.getName());
+            log.info("  Cantidad: {}", event.getQuantity());
+            log.info("  Precio:   ${}", event.getPrice());
+            log.info("  Fecha:    {}", event.getTimestamp());
+            log.info("=====================================");
+        }
+    }
+    ```
+
+    ### Verifying delivery
+
+    After creating a product, look for the following output in the `notification-service` logs:
+
+    ```text
+    === NOTIFICACIÓN RECIBIDA (Kafka) ===
+    Nuevo producto creado:
+      ID:       4
+      Nombre:   Monitor
+      ...
+    =====================================
+    ```
+
+    To list topics from within the running Kafka container:
+
+    ```bash
+    docker exec -it <kafka-container> kafka-topics.sh --bootstrap-server localhost:9092 --list
+    ```
+  </Tab>
+</Tabs>
+
+## Hexagonal integration
+
+The event publishing path follows the same Ports & Adapters pattern as persistence. The application layer publishes through an output port interface; the concrete broker adapter lives entirely in infrastructure.
+
+### Output port — `EventPublisherPort.java`
+
+```java title="domain/port/out/EventPublisherPort.java"
+package com.uade.inventory.domain.port.out;
+
+import com.uade.inventory.domain.event.ProductCreatedEvent;
+
+public interface EventPublisherPort {
+
+    void publishProductCreated(ProductCreatedEvent event);
+}
+```
+
+### Adapter selection by profile
+
+```text
+EventPublisherPort (domain interface)
+    ├── RabbitMQPublisherAdapter  →  @Profile("rabbitmq")
+    └── KafkaPublisherAdapter     →  @Profile("kafka")
+```
+
+Spring Boot activates exactly one adapter at startup based on the active profile. `ProductService` is injected with whichever implementation is active — it does not need to know which one.
+
+### Domain event — `ProductCreatedEvent.java`
+
+```java title="domain/event/ProductCreatedEvent.java"
+package com.uade.inventory.domain.event;
+
+import java.time.Instant;
+
+public class ProductCreatedEvent {
+
+    private Long productId;
+    private String name;
+    private Integer quantity;
+    private Double price;
+    private Instant timestamp;
+
+    public ProductCreatedEvent() {
+    }
+
+    public ProductCreatedEvent(Long productId, String name, Integer quantity, Double price) {
+        this.productId = productId;
+        this.name = name;
+        this.quantity = quantity;
+        this.price = price;
+        this.timestamp = Instant.now();
+    }
+
+    // getters and setters omitted for brevity
+}
+```
+
+## Component reference
+
+**Producer — `inventory-service`:**
+
+| File | Role | Profile |
+|------|------|---------|
+| `domain/event/ProductCreatedEvent.java` | Domain event object | all |
+| `domain/port/out/EventPublisherPort.java` | Output port interface | all |
+| `infrastructure/.../RabbitMQPublisherAdapter.java` | RabbitMQ adapter | `rabbitmq` |
+| `infrastructure/.../RabbitMQConfig.java` | Exchange, queue, binding | `rabbitmq` |
+| `infrastructure/.../KafkaPublisherAdapter.java` | Kafka adapter | `kafka` |
+| `infrastructure/.../KafkaConfig.java` | Producer configuration | `kafka` |
+
+**Consumer — `notification-service`:**
+
+| File | Role | Profile |
+|------|------|---------|
+| `event/ProductCreatedEvent.java` | Event DTO received from broker | all |
+| `listener/ProductEventListener.java` | `@RabbitListener` on `product.created.queue` | `rabbitmq` |
+| `config/RabbitMQConfig.java` | Consumer-side queue configuration | `rabbitmq` |
+| `listener/KafkaProductEventListener.java` | `@KafkaListener` on topic `product-created` | `kafka` |
+| `config/KafkaConfig.java` | Consumer configuration | `kafka` |

@@ -1,0 +1,197 @@
+---
+title: "API Gateway"
+description: "Spring Cloud Gateway acting as OAuth2 Resource Server, routing and validating JWT tokens for all downstream services."
+---
+
+The API Gateway is the single entry point for all external requests. It validates JWT tokens using Spring WebFlux Security (OAuth2 Resource Server), then routes authenticated requests to the appropriate downstream service discovered via Eureka.
+
+## Overview
+
+| Property | Value |
+|----------|-------|
+| **Port** | `8080` |
+| **Spring application name** | `api-gateway` |
+| **Security model** | OAuth2 Resource Server (WebFlux) |
+| **JWT algorithm** | HS384 |
+| **Health check** | `GET /actuator/health` |
+
+## Configuration
+
+```yaml
+# api-gateway/src/main/resources/application.yml
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      discovery:
+        locator:
+          enabled: true
+          lower-case-service-id: true
+      routes:
+        - id: auth-service
+          uri: lb://auth-service
+          predicates:
+            - Path=/auth/**
+          filters:
+            - AuthorizationHeader
+        - id: inventory-service
+          uri: lb://inventory-service
+          predicates:
+            - Path=/api/inventory/**
+          filters:
+            - AuthorizationHeader
+
+eureka:
+  instance:
+    prefer-ip-address: true
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+
+jwt:
+  secret: MiClaveSecretaParaJWT_MuyLarga_Y_Segura_123456789
+
+management:
+  tracing:
+    sampling:
+      probability: 0.0
+
+logging:
+  pattern:
+    correlation: "[${spring.application.name:},%X{traceId:-},%X{spanId:-}] "
+  level:
+    org.springframework.cloud.gateway: DEBUG
+    org.springframework.security: DEBUG
+    reactor.netty: DEBUG
+```
+
+## Route table
+
+| Route ID | Incoming path | Upstream service | Auth required |
+|----------|---------------|------------------|---------------|
+| `auth-service` | `/auth/**` | `lb://auth-service` | No (`/auth/**` is permitted) |
+| `inventory-service` | `/api/inventory/**` | `lb://inventory-service` | Yes |
+
+The `AuthorizationHeader` filter propagates the `Authorization` header to the downstream service so it can perform its own OAuth2 Resource Server validation.
+
+## Security
+
+Security is implemented with Spring WebFlux Security (`@EnableWebFluxSecurity`). The gateway decodes and verifies the JWT using a symmetric `NimbusReactiveJwtDecoder` configured with the shared HS384 secret:
+
+```java
+@Configuration
+@EnableWebFluxSecurity
+public class SecurityConfig {
+
+    @Value("${jwt.secret}")
+    private String jwtSecret;
+
+    @Bean
+    public ReactiveJwtDecoder reactiveJwtDecoder() {
+        SecretKey key = new SecretKeySpec(
+            jwtSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA384");
+        return NimbusReactiveJwtDecoder
+            .withSecretKey(key)
+            .macAlgorithm(MacAlgorithm.HS384)
+            .build();
+    }
+
+    @Bean
+    public SecurityWebFilterChain securityWebFilterChain(ServerHttpSecurity http) {
+        return http
+            .authorizeExchange(exchange -> exchange
+                .pathMatchers("/auth/**").permitAll()
+                .pathMatchers("/actuator/**", "/h2-console/**").permitAll()
+                .anyExchange().authenticated()
+            )
+            .oauth2ResourceServer(oauth2 -> oauth2
+                .jwt(jwt -> jwt.jwtDecoder(reactiveJwtDecoder()))
+            )
+            .csrf(ServerHttpSecurity.CsrfSpec::disable)
+            .build();
+    }
+}
+```
+
+<Warning>
+  The `jwt.secret` value must be **identical** in `auth-service`, `api-gateway`, and `inventory-service`. A mismatch will cause the gateway to reject all tokens with `401 Unauthorized`.
+</Warning>
+
+## Zipkin tracing
+
+The gateway is the first span in every distributed trace. In Docker, the Zipkin endpoint is overridden via the environment variable:
+
+```yaml
+# docker-compose.yml
+environment:
+  MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://zipkin:9411/api/v2/spans
+```
+
+Locally, configure in `application.yml`:
+
+```yaml
+management:
+  zipkin:
+    tracing:
+      endpoint: http://localhost:9411/api/v2/spans
+  tracing:
+    sampling:
+      probability: 1.0
+```
+
+## Key dependencies
+
+| Dependency | Purpose |
+|------------|---------|
+| `spring-cloud-starter-gateway` | WebFlux-based reverse proxy and routing |
+| `spring-boot-starter-security` | WebFlux Security filter chain |
+| `spring-boot-starter-oauth2-resource-server` | JWT validation as Resource Server |
+| `spring-cloud-starter-netflix-eureka-client` | Service discovery for `lb://` URIs |
+| `micrometer-tracing-bridge-brave` + `zipkin-reporter-brave` | Distributed tracing |
+| `logstash-logback-encoder` 7.4 | JSON log shipping to Logstash |
+
+## Starting the service
+
+<Note>
+  The API Gateway should be started **after** `auth-service` and `inventory-service` have registered in Eureka. If the gateway starts before those services are registered, route resolution will fail until they appear in the registry.
+</Note>
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    docker compose --profile rabbitmq up --build
+    ```
+
+    The service depends on `config-server` (healthy), `eureka-server` (healthy), and `zipkin` (healthy).
+  </Tab>
+  <Tab title="Manual (bash)">
+    ```bash
+    # Terminal 5 — start last, after auth-service and inventory-service are registered
+    cd api-gateway
+    mvn spring-boot:run
+    ```
+  </Tab>
+  <Tab title="Manual (CMD)">
+    ```cmd
+    cd api-gateway
+    mvn spring-boot:run
+    ```
+  </Tab>
+</Tabs>
+
+## Health check
+
+```bash
+curl http://localhost:8080/actuator/health
+```
+
+<Card title="Auth Service" href="/services/auth-service">
+  Issues JWT tokens that the gateway validates on every protected request.
+</Card>
+<Card title="Inventory Service" href="/services/inventory-service">
+  Primary downstream service behind the `/api/inventory/**` route.
+</Card>

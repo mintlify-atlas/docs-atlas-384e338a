@@ -1,0 +1,124 @@
+---
+title: "Config Server"
+description: "Centralized configuration service using Spring Cloud Config with native filesystem profile."
+---
+
+The Config Server is the first service that must be running. Every other service in the ecosystem fetches its configuration from it on startup. It uses the `native` Spring Cloud Config profile, reading YAML files directly from the local `config/` directory instead of a Git repository.
+
+## Overview
+
+| Property | Value |
+|----------|-------|
+| **Port** | `8888` |
+| **Spring application name** | `config-server` |
+| **Profile** | `native` |
+| **Config location** | `file:./config` |
+| **Health check** | `GET /actuator/health` |
+
+## Configuration
+
+```yaml
+# config-server/src/main/resources/application.yml
+server:
+  port: 8888
+
+spring:
+  application:
+    name: config-server
+  cloud:
+    config:
+      server:
+        native:
+          search-locations: file:./config
+      fail-fast: false
+```
+
+<Warning>
+  The Config Server **must** be started with the `native` Spring profile. Without it, Spring Cloud Config defaults to the `git` backend and throws `Invalid config server configuration` because no Git repository is configured. Always pass `-Dspring-boot.run.profiles=native` when running manually, or set `SPRING_PROFILES_ACTIVE=native` in Docker.
+</Warning>
+
+## Starting the service
+
+<Tabs>
+  <Tab title="Docker">
+    The `docker-compose.yml` sets `SPRING_PROFILES_ACTIVE: native` automatically:
+
+    ```yaml
+    config-server:
+      build:
+        context: .
+        dockerfile: config-server/Dockerfile
+      ports:
+        - "8888:8888"
+      environment:
+        SPRING_PROFILES_ACTIVE: native
+      healthcheck:
+        test: ["CMD", "wget", "--no-verbose", "--tries=1", "-O", "/dev/null", "http://localhost:8888/actuator/health"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+        start_period: 40s
+    ```
+
+    ```bash
+    docker compose --profile rabbitmq up --build
+    ```
+  </Tab>
+  <Tab title="Manual (bash)">
+    ```bash
+    # Terminal 1 — Config Server must be first
+    cd config-server
+    mvn spring-boot:run -Dspring-boot.run.profiles=native
+    ```
+  </Tab>
+  <Tab title="Manual (CMD)">
+    ```cmd
+    cd config-server
+    mvn spring-boot:run -Dspring-boot.run.profiles=native
+    ```
+  </Tab>
+</Tabs>
+
+## Health check
+
+```bash
+curl http://localhost:8888/actuator/health
+```
+
+Expected response:
+
+```json
+{ "status": "UP" }
+```
+
+## How other services reference it
+
+All downstream services point to Eureka for service discovery; they do **not** call the Config Server directly via HTTP in this setup. The Config Server registers itself in Eureka so clients can discover it by name. When running locally, the default Eureka zone is:
+
+```yaml
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+```
+
+In Docker Compose, each service overrides this with the container hostname:
+
+```yaml
+environment:
+  EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka-server:8761/eureka/
+```
+
+## Startup order
+
+Config Server has no dependencies and must start first:
+
+```
+config-server  →  eureka-server  →  auth-service / inventory-service  →  api-gateway
+```
+
+All other services declare `condition: service_healthy` on the Config Server healthcheck in `docker-compose.yml`.
+
+<Card title="Eureka Server" href="/services/eureka-server">
+  The next service to start — handles service registration and discovery.
+</Card>

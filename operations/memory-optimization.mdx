@@ -1,0 +1,133 @@
+---
+title: "Memory Optimization"
+description: "Configuration tips for running the full ecosystem on machines with limited RAM."
+---
+
+## Memory Consumption Overview
+
+The full ecosystem spans multiple processes. The table below shows approximate RAM usage per component in an optimized development configuration:
+
+| Component | Memory (RAM) | Notes |
+|-----------|-------------|-------|
+| RabbitMQ | 100–200 MB | Lightweight, recommended |
+| Kafka + Zookeeper | 400–600 MB | Heavier alternative |
+| Elasticsearch | 256–512 MB | Configured for development |
+| Logstash | 100–200 MB | Light processing |
+| Kibana | 200–400 MB RAM / 900 MB–1.1 GB disk | Web UI (Node.js embedded) |
+| Zipkin | 100–200 MB | Optional distributed tracing |
+| Spring Boot services (×4) | 300–500 MB | ~150 MB each |
+| **Total (approximate)** | **1.5–3 GB** | Depends on active components |
+
+## Recommendations by Available RAM
+
+| Available RAM | Recommended configuration |
+|---------------|---------------------------|
+| 8 GB total | RabbitMQ + ELK stack (without Zipkin) |
+| 4 GB total | RabbitMQ + Spring Boot services only |
+
+<Tip>
+  Running without Zipkin and ELK is perfectly viable for local development when you only need to test the API. Add ELK when you need to debug log pipelines, and add Zipkin when you need to trace request flows across services.
+</Tip>
+
+## Elasticsearch Heap
+
+Elasticsearch is the most memory-intensive component. In Docker, the `ES_JAVA_OPTS` environment variable in `docker-compose.yml` already limits the JVM heap:
+
+```yaml
+environment:
+  ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+```
+
+If you run Elasticsearch **locally** (outside Docker), edit `config/jvm.options` to reduce the heap further:
+
+```
+-Xms256m
+-Xmx512m
+```
+
+Elasticsearch is also hard-limited in Docker Compose with a container memory cap:
+
+```yaml
+deploy:
+  resources:
+    limits:
+      memory: 1g
+```
+
+This prevents Elasticsearch from consuming more than 1 GB of container memory, even under high indexing load.
+
+## Kibana Optimization
+
+Kibana runs an embedded Node.js process that polls internal metrics on a fixed interval. Reducing the poll interval and disabling telemetry measurably cuts baseline CPU and memory usage.
+
+Edit `config/kibana.yml` and add the following:
+
+```yaml
+# Reduce the operations polling interval (ms) — less CPU overhead
+ops.interval: 5000
+
+# Cap the maximum request payload size
+server.maxPayloadBytes: 1048576
+
+# Disable usage telemetry
+telemetry.optIn: false
+```
+
+Kibana consumes approximately 200–400 MB of RAM in this configuration. Note that the unpacked installation on disk occupies 900 MB–1.1 GB due to the embedded Node.js runtime and frontend bundles.
+
+## Reducing the Footprint
+
+### Don't start what you don't need
+
+<Steps>
+  <Step title="Skip Zipkin if you don't need distributed tracing">
+    Zipkin is not required for the core API to function. Omit it from your startup command:
+
+    ```bash
+    # Start with RabbitMQ, skipping Zipkin
+    docker compose --profile rabbitmq up config-server eureka-server auth-service api-gateway inventory-service-rabbitmq notification-service-rabbitmq -d
+    ```
+  </Step>
+
+  <Step title="Skip ELK if you don't need centralized logging">
+    Elasticsearch, Logstash, and Kibana together consume 600 MB–1.3 GB. If you only need application logs in the terminal, do not start these services. The Spring Boot services log to stdout regardless.
+  </Step>
+
+  <Step title="Use RabbitMQ instead of Kafka">
+    RabbitMQ uses 100–200 MB. Kafka (KRaft mode, no Zookeeper) uses 400–600 MB. Unless you specifically need Kafka semantics, use the `rabbitmq` profile:
+
+    ```bash
+    docker compose --profile rabbitmq up --build
+    ```
+  </Step>
+
+  <Step title="Run only the Spring Boot services you need">
+    `config-server` and `eureka-server` are mandatory. `auth-service` and `api-gateway` are required for authenticated requests. `notification-service` can be omitted if you don't need to verify event delivery.
+  </Step>
+</Steps>
+
+## Docker Compose Memory Limits
+
+The `docker-compose.yml` already sets a hard memory limit on Elasticsearch:
+
+```yaml
+elasticsearch:
+  ...
+  deploy:
+    resources:
+      limits:
+        memory: 1g
+```
+
+You can apply similar limits to other services to prevent runaway memory growth during long-running development sessions. For example, to cap a Spring Boot service at 256 MB:
+
+```yaml
+deploy:
+  resources:
+    limits:
+      memory: 256m
+```
+
+<Tip>
+  If you observe Docker Desktop consuming unexpectedly high RAM on macOS or Windows, check the WSL 2 / HyperKit memory ceiling in Docker Desktop settings. Setting it to 4–6 GB (instead of the default half of system RAM) can significantly reduce the host memory footprint.
+</Tip>
